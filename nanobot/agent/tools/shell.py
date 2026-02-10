@@ -123,9 +123,10 @@ class ExecTool(Tool):
         if is_high_risk_command(lower) and not self.allow_high_risk:
             return "Error: Command blocked by safety guard (high-risk command detected)"
 
-        for pattern in self.deny_patterns:
-            if re.search(pattern, lower):
-                return "Error: Command blocked by safety guard (dangerous pattern detected)"
+        if not self.allow_high_risk:
+            for pattern in self.deny_patterns:
+                if re.search(pattern, lower):
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
         if self.allow_patterns:
             if not any(re.search(p, lower) for p in self.allow_patterns):
