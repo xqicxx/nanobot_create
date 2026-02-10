@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.guardrails import is_high_risk_command
 
 
 class ExecTool(Tool):
@@ -19,6 +20,8 @@ class ExecTool(Tool):
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
+        include_exit_code: bool = False,
+        allow_high_risk: bool = False,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -34,6 +37,8 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self.include_exit_code = include_exit_code
+        self.allow_high_risk = allow_high_risk
     
     @property
     def name(self) -> str:
@@ -95,6 +100,8 @@ class ExecTool(Tool):
             
             if process.returncode != 0:
                 output_parts.append(f"\nExit code: {process.returncode}")
+            elif self.include_exit_code:
+                output_parts.append(f"\nExit code: {process.returncode}")
             
             result = "\n".join(output_parts) if output_parts else "(no output)"
             
@@ -112,6 +119,9 @@ class ExecTool(Tool):
         """Best-effort safety guard for potentially destructive commands."""
         cmd = command.strip()
         lower = cmd.lower()
+
+        if is_high_risk_command(lower) and not self.allow_high_risk:
+            return "Error: Command blocked by safety guard (high-risk command detected)"
 
         for pattern in self.deny_patterns:
             if re.search(pattern, lower):

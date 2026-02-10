@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,14 +12,16 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.confirmations import ConfirmationStore
+from nanobot.agent.subtask_output import parse_subtask_output
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
+from nanobot.agent.tools.filesystem import ReadFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.readonly_exec import ReadOnlyExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
-from nanobot.agent.tools.cron import CronTool
-from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.subagent import SubagentManager, SpawnResult
 from nanobot.session.manager import SessionManager
 
 
@@ -62,6 +65,17 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self.confirmations = ConfirmationStore(ttl_seconds=300)
+        self.active_subtasks: dict[str, dict[str, Any]] = {}
+        self._spawned_this_turn: list[dict[str, Any]] = []
+        self._confirm_exec = ExecTool(
+            working_dir=str(self.workspace),
+            timeout=self.exec_config.timeout,
+            restrict_to_workspace=self.restrict_to_workspace,
+            include_exit_code=True,
+            deny_patterns=[],
+            allow_high_risk=True,
+        )
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -70,6 +84,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            cron_service=self.cron_service,
         )
         
         self._running = False
@@ -80,15 +95,15 @@ class AgentLoop:
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
         
-        # Shell tool
-        self.tools.register(ExecTool(
+        # Read-only shell tool (delegates when unsafe)
+        self.tools.register(ReadOnlyExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
+            confirmations=self.confirmations,
+            spawn_cb=self._spawn_subtask,
         ))
         
         # Web tools
@@ -100,12 +115,8 @@ class AgentLoop:
         self.tools.register(message_tool)
         
         # Spawn tool (for subagents)
-        spawn_tool = SpawnTool(manager=self.subagents)
+        spawn_tool = SpawnTool(spawn_cb=self._spawn_subtask)
         self.tools.register(spawn_tool)
-        
-        # Cron tool (for scheduling)
-        if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -140,6 +151,120 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    def _extract_confirmation_id(self, text: str) -> str | None:
+        match = re.match(r"^\\s*确认\\s+(CONFIRM-[A-Z0-9]{4,})\\s*$", text.strip())
+        if match:
+            return match.group(1)
+        return None
+
+    async def _handle_confirmation(self, confirm_id: str, msg: InboundMessage) -> OutboundMessage:
+        record = self.confirmations.consume(confirm_id)
+        if not record:
+            content = f"确认码 {confirm_id} 无效或已过期。请重新发起确认。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        if not record.command.strip():
+            content = f"确认码 {confirm_id} 未绑定可执行命令，请重新发起确认。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        result = await self._confirm_exec.execute(
+            command=record.command,
+            working_dir=record.working_dir,
+        )
+        content = (
+            f"已执行确认命令（{confirm_id}）。\\n"
+            f"命令：{record.command}\\n"
+            f"结果：\\n{result}"
+        )
+
+        # Save to session
+        session = self.sessions.get_or_create(msg.session_key)
+        session.add_message("user", msg.content)
+        session.add_message("assistant", content)
+        self.sessions.save(session)
+
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+    async def _spawn_subtask(
+        self,
+        task: str,
+        label: str | None,
+        origin_channel: str,
+        origin_chat_id: str,
+    ) -> SpawnResult:
+        result = await self.subagents.spawn(
+            task=task,
+            label=label,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
+        )
+        self.active_subtasks[result.task_id] = {
+            "task": result.task,
+            "label": result.label,
+            "origin": {"channel": origin_channel, "chat_id": origin_chat_id},
+        }
+        self._spawned_this_turn.append({
+            "task_id": result.task_id,
+            "label": result.label,
+            "task": result.task,
+        })
+        return result
+
+    async def _delegate_tool_call(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        msg: InboundMessage,
+        origin_channel: str | None = None,
+        origin_chat_id: str | None = None,
+    ) -> str:
+        task, label = self._build_subtask_task(tool_name, args)
+        channel = origin_channel or msg.channel
+        chat_id = origin_chat_id or msg.chat_id
+        await self._spawn_subtask(task, label, channel, chat_id)
+        return f"已将 {tool_name} 交由子任务执行。"
+
+    def _build_subtask_task(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
+        if tool_name == "write_file":
+            path = args.get("path", "")
+            content = args.get("content", "")
+            task = f"写入文件：{path}\\n内容：\\n{content}"
+            label = f"write:{Path(path).name or 'file'}"
+            return task, label
+        if tool_name == "edit_file":
+            path = args.get("path", "")
+            old_text = args.get("old_text", "")
+            new_text = args.get("new_text", "")
+            task = (
+                f"编辑文件：{path}\\n"
+                f"替换：\\n{old_text}\\n"
+                f"为：\\n{new_text}"
+            )
+            label = f"edit:{Path(path).name or 'file'}"
+            return task, label
+        if tool_name == "cron":
+            task = f"设置定时任务：{json.dumps(args, ensure_ascii=False)}"
+            return task, "cron"
+        task = f"执行工具 {tool_name}：{json.dumps(args, ensure_ascii=False)}"
+        return task, tool_name
+
+    def _build_spawn_ack(self, user_request: str, spawned: list[dict[str, Any]]) -> str:
+        def _summarize(text: str, max_len: int = 80) -> str:
+            clean = " ".join(text.split())
+            return clean if len(clean) <= max_len else clean[:max_len] + "..."
+
+        tasks = "\n".join([f"- {item['label']}: {_summarize(item['task'])}" for item in spawned])
+        first = spawned[0]["label"] if spawned else "子任务"
+        return (
+            "## 我懂你的意思\n"
+            f"- 你想做的是：{user_request.strip()}\n\n"
+            "## 我打算怎么做\n"
+            f"{tasks}\n\n"
+            "## 我先去干活\n"
+            f"- 先让子任务执行：{first}\n\n"
+            "## 等我消息\n"
+            "- 我拿到结果会帮你验一遍再回复"
+        )
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
@@ -155,10 +280,18 @@ class AgentLoop:
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
+
+        # Handle confirmation replies before LLM
+        confirm_id = self._extract_confirmation_id(msg.content)
+        if confirm_id:
+            return await self._handle_confirmation(confirm_id, msg)
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         
+        # Reset per-turn spawn tracking
+        self._spawned_this_turn = []
+
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
         
@@ -171,9 +304,9 @@ class AgentLoop:
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
         
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(msg.channel, msg.chat_id)
+        exec_tool = self.tools.get("exec")
+        if isinstance(exec_tool, ReadOnlyExecTool):
+            exec_tool.set_context(msg.channel, msg.chat_id)
         
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
@@ -221,10 +354,23 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if tool_call.name in {"write_file", "edit_file", "cron"}:
+                        result = await self._delegate_tool_call(
+                            tool_call.name,
+                            tool_call.arguments,
+                            msg,
+                            origin_channel=origin_channel,
+                            origin_chat_id=origin_chat_id,
+                        )
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                if self._spawned_this_turn:
+                    final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                    break
             else:
                 # No tool calls, we're done
                 final_content = response.content
@@ -271,6 +417,10 @@ class AgentLoop:
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
+
+        task_id = (msg.metadata or {}).get("task_id")
+        if task_id and task_id in self.active_subtasks:
+            self.active_subtasks.pop(task_id, None)
         
         # Update tool contexts
         message_tool = self.tools.get("message")
@@ -280,11 +430,51 @@ class AgentLoop:
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
+
+        exec_tool = self.tools.get("exec")
+        if isinstance(exec_tool, ReadOnlyExecTool):
+            exec_tool.set_context(origin_channel, origin_chat_id)
         
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(origin_channel, origin_chat_id)
-        
+        # Fast-path failure/high-risk results without LLM
+        parsed = parse_subtask_output(msg.content)
+        status = parsed.get("status")
+        if status in {"失败", "高风险拦截"}:
+            response_text = ""
+            if status == "高风险拦截" or "high_risk_command" in (msg.metadata or {}):
+                command = (msg.metadata or {}).get("high_risk_command") or ""
+                working_dir = (msg.metadata or {}).get("working_dir")
+                if command:
+                    record = self.confirmations.create(
+                        command=command,
+                        arguments={"command": command, "working_dir": working_dir},
+                        working_dir=working_dir or str(self.workspace),
+                    )
+                    response_text = (
+                        "子任务拦截了高风险命令，需要人工确认。\n"
+                        f"Command ID: {record.id}\n"
+                        f"请回复：确认 {record.id}\n"
+                        "提示：Command ID 仅一次有效，默认 5 分钟过期。"
+                    )
+                else:
+                    response_text = "子任务拦截了高风险命令，但未提供可执行命令。请补充具体命令。"
+            else:
+                error_cause = parsed.get("error_cause", "未知")
+                response_text = (
+                    f"子任务失败（错误归因：{error_cause}）。\n"
+                    "请确认下一步：修正需求/补充权限/允许重试。"
+                )
+
+            session = self.sessions.get_or_create(session_key)
+            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
+            session.add_message("assistant", response_text)
+            self.sessions.save(session)
+
+            return OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=response_text,
+            )
+
         # Build messages with the announce content
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -326,7 +516,10 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if tool_call.name in {"write_file", "edit_file", "cron"}:
+                        result = await self._delegate_tool_call(tool_call.name, tool_call.arguments, msg)
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )

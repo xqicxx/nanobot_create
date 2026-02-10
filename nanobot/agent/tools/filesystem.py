@@ -1,6 +1,7 @@
 """File system tools: read, write, edit."""
 
 from pathlib import Path
+import difflib
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -93,7 +94,11 @@ class WriteFileTool(Tool):
             file_path = _resolve_path(path, self._allowed_dir)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
-            return f"Successfully wrote {len(content)} bytes to {path}"
+            preview = _preview_text(file_path.read_text(encoding="utf-8"), max_lines=20)
+            return (
+                f"Successfully wrote {len(content)} bytes to {path}\n"
+                f"Evidence (first 20 lines):\n{preview}"
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -153,8 +158,18 @@ class EditFileTool(Tool):
             
             new_content = content.replace(old_text, new_text, 1)
             file_path.write_text(new_content, encoding="utf-8")
-            
-            return f"Successfully edited {path}"
+
+            diff = "\n".join(
+                difflib.unified_diff(
+                    content.splitlines(),
+                    new_content.splitlines(),
+                    fromfile=str(file_path),
+                    tofile=str(file_path),
+                    lineterm="",
+                )
+            )
+            diff_preview = diff if diff else _preview_text(new_content, max_lines=20)
+            return f"Successfully edited {path}\nEvidence (diff):\n{diff_preview}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -209,3 +224,11 @@ class ListDirTool(Tool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error listing directory: {str(e)}"
+
+
+def _preview_text(text: str, max_lines: int = 20, max_chars: int = 2000) -> str:
+    lines = text.splitlines()
+    snippet = "\n".join(lines[:max_lines])
+    if len(snippet) > max_chars:
+        return snippet[:max_chars] + f"\n... (truncated, {len(snippet) - max_chars} more chars)"
+    return snippet
