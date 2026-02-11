@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from loguru import logger
 
@@ -653,6 +654,49 @@ class AgentLoop:
         ]
         return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 
+    def _is_weather_intent(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.search(r"(天气|气温|温度|weather|forecast)", text, re.IGNORECASE))
+
+    def _extract_weather_location(self, text: str) -> str:
+        if not text:
+            return ""
+        lowered = text.strip()
+        m = re.search(r"weather\\s+in\\s+(.+)", lowered, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        cleaned = re.sub(r"(天气|气温|温度|查询|看看|一下|现在|今天|的|吧)", "", lowered)
+        cleaned = cleaned.strip(" ,，。?？!！")
+        return cleaned.strip()
+
+    async def _handle_weather(self, msg: InboundMessage) -> OutboundMessage | None:
+        if not self._is_weather_intent(msg.content or ""):
+            return None
+        if self._wants_subtask_spawn(msg.content or ""):
+            return None
+        location = self._extract_weather_location(msg.content or "")
+        if not location:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="请告诉我具体地点，例如：北京天气。",
+            )
+        url = f"https://wttr.in/{quote_plus(location)}?format=3"
+        result = await self.tools.execute(
+            "web_fetch",
+            {"url": url, "extractMode": "text", "maxChars": 500},
+        )
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                text = (data.get("text") or "").strip()
+                if text:
+                    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=text)
+        except Exception:
+            pass
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
     def _handle_version_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
         if raw not in {"/version", "/ver"}:
@@ -740,6 +784,15 @@ class AgentLoop:
             session.add_message("assistant", content)
             self.sessions.save(session)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        # Handle weather intent before LLM
+        weather_response = await self._handle_weather(msg)
+        if weather_response:
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", weather_response.content)
+            self.sessions.save(session)
+            return weather_response
 
         # Handle /subtask commands before LLM
         subtask_response = self._handle_subtask_command(msg)

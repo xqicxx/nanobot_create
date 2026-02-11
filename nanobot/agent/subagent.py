@@ -238,29 +238,7 @@ class SubagentManager:
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
 
-                        is_side_effect = tool_call.name in {"write_file", "edit_file", "exec", "cron"}
-                        if is_side_effect:
-                            if side_effect_count >= 1:
-                                status_hint = "失败"
-                                error_cause_hint = "拦截"
-                                risk_hint = "单次子任务原则：一个子任务仅允许一个副作用操作。"
-                                next_step_hint = "请由主会话拆分为多个子任务。"
-                                _record_evidence("拦截原因", "检测到多个副作用操作尝试，已拦截。")
-                                final_result = render_subtask_result(
-                                    format_subtask_output(
-                                        raw="副作用操作数量超过限制，已拦截。",
-                                        status_hint=status_hint,
-                                        error_cause_hint=error_cause_hint,
-                                        evidence="\n\n".join(evidence_items) if evidence_items else "无",
-                                        risk=risk_hint,
-                                        next_step=next_step_hint,
-                                        exit_code=exit_code,
-                                        task_id=task_id,
-                                    )
-                                )
-                                break
-                            side_effect_count += 1
-
+                        is_side_effect = tool_call.name in {"write_file", "edit_file", "cron"}
                         if tool_call.name == "exec":
                             cmd = tool_call.arguments.get("command", "")
                             check = classify_command(cmd)
@@ -287,6 +265,32 @@ class SubagentManager:
                                     )
                                 )
                                 break
+                            # Treat read-only exec as non-side-effect to avoid false blocking
+                            if check.readonly_allowed and not check.dangerous_syntax:
+                                is_side_effect = False
+                            else:
+                                is_side_effect = True
+                        if is_side_effect:
+                            if side_effect_count >= 1:
+                                status_hint = "失败"
+                                error_cause_hint = "拦截"
+                                risk_hint = "单次子任务原则：一个子任务仅允许一个副作用操作。"
+                                next_step_hint = "请由主会话拆分为多个子任务。"
+                                _record_evidence("拦截原因", "检测到多个副作用操作尝试，已拦截。")
+                                final_result = render_subtask_result(
+                                    format_subtask_output(
+                                        raw="副作用操作数量超过限制，已拦截。",
+                                        status_hint=status_hint,
+                                        error_cause_hint=error_cause_hint,
+                                        evidence="\n\n".join(evidence_items) if evidence_items else "无",
+                                        risk=risk_hint,
+                                        next_step=next_step_hint,
+                                        exit_code=exit_code,
+                                        task_id=task_id,
+                                    )
+                                )
+                                break
+                            side_effect_count += 1
 
                         pre_content: str | None = None
                         if tool_call.name == "edit_file":

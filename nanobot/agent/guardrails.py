@@ -66,8 +66,16 @@ def has_dangerous_shell_syntax(command: str) -> bool:
     return any(token in cmd for token in _DANGEROUS_SHELL_TOKENS)
 
 
+def has_sensitive_keywords(command: str) -> bool:
+    return bool(_SENSITIVE_KEYWORDS_RE.search(command))
+
+
+def has_sensitive_paths(command: str) -> bool:
+    return bool(_SENSITIVE_PATH_RE.search(command))
+
+
 def has_sensitive_tokens(command: str) -> bool:
-    return bool(_SENSITIVE_KEYWORDS_RE.search(command) or _SENSITIVE_PATH_RE.search(command))
+    return bool(has_sensitive_keywords(command) or has_sensitive_paths(command))
 
 
 def is_high_risk_command(command: str) -> bool:
@@ -119,4 +127,3 @@ def classify_command(command: str) -> CommandCheck:
         sensitive=has_sensitive_tokens(command),
         dangerous_syntax=has_dangerous_shell_syntax(command),
     )
-

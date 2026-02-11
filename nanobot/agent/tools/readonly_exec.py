@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from nanobot.agent.confirmations import ConfirmationStore
-from nanobot.agent.guardrails import classify_command
+from nanobot.agent.guardrails import classify_command, has_sensitive_keywords, has_sensitive_paths
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.shell import ExecTool
 
@@ -87,10 +87,21 @@ class ReadOnlyExecTool(Tool):
             )
 
         if check.sensitive:
-            return await self._delegate(
-                command,
-                "由于涉及敏感路径或关键词，为了安全，我将启动子任务进行受限访问。",
-            )
+            # Allow sensitive path matches if the command stays within the workspace,
+            # but always block explicit sensitive keywords.
+            if has_sensitive_keywords(command):
+                return await self._delegate(
+                    command,
+                    "由于涉及敏感关键词，为了安全，我将启动子任务进行受限访问。",
+                )
+            if has_sensitive_paths(command):
+                if self._default_cwd and self._default_cwd in command:
+                    pass
+                else:
+                    return await self._delegate(
+                        command,
+                        "由于涉及敏感路径，为了安全，我将启动子任务进行受限访问。",
+                    )
 
         if check.dangerous_syntax or not check.readonly_allowed:
             return await self._delegate(
