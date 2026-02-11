@@ -16,15 +16,41 @@ class MessageBus:
     them and pushes responses to the outbound queue.
     """
     
-    def __init__(self):
-        self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
-        self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+    def __init__(
+        self,
+        inbound_maxsize: int = 1000,
+        outbound_maxsize: int = 1000,
+        drop_on_full: bool = False,
+        put_timeout: float | None = None,
+    ):
+        inbound_size = max(1, int(inbound_maxsize))
+        outbound_size = max(1, int(outbound_maxsize))
+        self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=inbound_size)
+        self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=outbound_size)
         self._outbound_subscribers: dict[str, list[Callable[[OutboundMessage], Awaitable[None]]]] = {}
         self._running = False
+        self._drop_on_full = drop_on_full
+        self._put_timeout = put_timeout
+
+    async def _queue_put(self, queue: asyncio.Queue, msg: object, label: str) -> None:
+        if self._drop_on_full:
+            try:
+                queue.put_nowait(msg)
+                return
+            except asyncio.QueueFull:
+                logger.warning(f"MessageBus {label} queue full; dropped message")
+                return
+        if self._put_timeout is None:
+            await queue.put(msg)
+            return
+        try:
+            await asyncio.wait_for(queue.put(msg), timeout=self._put_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"MessageBus {label} queue full; put timed out")
     
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
-        await self.inbound.put(msg)
+        await self._queue_put(self.inbound, msg, "inbound")
     
     async def consume_inbound(self) -> InboundMessage:
         """Consume the next inbound message (blocks until available)."""
@@ -32,7 +58,7 @@ class MessageBus:
     
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
-        await self.outbound.put(msg)
+        await self._queue_put(self.outbound, msg, "outbound")
     
     async def consume_outbound(self) -> OutboundMessage:
         """Consume the next outbound message (blocks until available)."""

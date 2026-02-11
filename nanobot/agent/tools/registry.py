@@ -59,7 +59,7 @@ class ToolRegistry:
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
             return await tool.execute(**params)
         except Exception as e:
-            return f"Error executing {name}: {str(e)}"
+            return f"Error: executing {name} failed: {str(e)}"
     
     @property
     def tool_names(self) -> list[str]:

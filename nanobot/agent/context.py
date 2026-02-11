@@ -19,6 +19,9 @@ class ContextBuilder:
     """
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    MAX_IMAGE_BYTES = 2 * 1024 * 1024
+    MAX_TOTAL_IMAGE_BYTES = 6 * 1024 * 1024
+    MAX_IMAGE_COUNT = 4
     
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -166,16 +169,34 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
             return text
         
         images = []
+        total_bytes = 0
+        skipped = []
         for path in media:
+            if len(images) >= self.MAX_IMAGE_COUNT:
+                skipped.append(f"{path} (too many images)")
+                continue
             p = Path(path)
             mime, _ = mimetypes.guess_type(path)
             if not p.is_file() or not mime or not mime.startswith("image/"):
                 continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > self.MAX_IMAGE_BYTES:
+                skipped.append(f"{p.name} (too large)")
+                continue
+            if total_bytes + size > self.MAX_TOTAL_IMAGE_BYTES:
+                skipped.append(f"{p.name} (total size limit)")
+                continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            total_bytes += size
         
         if not images:
             return text
+        if skipped:
+            text = text + "\n\n[Some images were skipped due to size limits: " + ", ".join(skipped) + "]"
         return images + [{"type": "text", "text": text}]
     
     def add_tool_result(

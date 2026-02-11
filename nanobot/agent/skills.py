@@ -5,6 +5,9 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -166,13 +169,26 @@ class SkillsLoader:
                 return content[match.end():].strip()
         return content
     
-    def _parse_nanobot_metadata(self, raw: str) -> dict:
-        """Parse nanobot metadata JSON from frontmatter."""
-        try:
-            data = json.loads(raw)
-            return data.get("nanobot", {}) if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, TypeError):
+    def _parse_nanobot_metadata(self, raw: Any) -> dict:
+        """Parse nanobot metadata from frontmatter (dict or JSON string)."""
+        if raw is None:
             return {}
+        if isinstance(raw, dict):
+            if "nanobot" in raw and isinstance(raw["nanobot"], dict):
+                return raw["nanobot"]
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                data = json.loads(raw)
+                return data.get("nanobot", {}) if isinstance(data, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    data = yaml.safe_load(raw)
+                    if isinstance(data, dict):
+                        return data.get("nanobot", {}) if "nanobot" in data else data
+                except yaml.YAMLError:
+                    return {}
+        return {}
     
     def _check_requirements(self, skill_meta: dict) -> bool:
         """Check if skill requirements are met (bins, env vars)."""
@@ -217,12 +233,11 @@ class SkillsLoader:
         if content.startswith("---"):
             match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
             if match:
-                # Simple YAML parsing
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                return metadata
+                try:
+                    data = yaml.safe_load(match.group(1))
+                except yaml.YAMLError:
+                    return None
+                if isinstance(data, dict):
+                    return data
         
         return None

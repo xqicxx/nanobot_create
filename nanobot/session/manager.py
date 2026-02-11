@@ -141,6 +141,7 @@ class SessionManager:
             # Write metadata first
             metadata_line = {
                 "_type": "metadata",
+                "key": session.key,
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata
@@ -190,8 +191,13 @@ class SessionManager:
                     if first_line:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
+                            key = data.get("key")
+                            if not key:
+                                meta = data.get("metadata")
+                                if isinstance(meta, dict):
+                                    key = meta.get("key")
                             sessions.append({
-                                "key": path.stem.replace("_", ":"),
+                                "key": key or path.stem.replace("_", ":"),
                                 "created_at": data.get("created_at"),
                                 "updated_at": data.get("updated_at"),
                                 "path": str(path)

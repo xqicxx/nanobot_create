@@ -16,12 +16,13 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.confirmations import ConfirmationStore
 from nanobot.agent.subtask_output import parse_subtask_output
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.filesystem import ReadFileTool, ListDirTool
+from nanobot.agent.tools.filesystem import ReadFileTool, ListDirTool, WriteFileTool, EditFileTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.readonly_exec import ReadOnlyExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.delegate import DelegateTool
 from nanobot.agent.subagent import SubagentManager, SpawnResult
 from nanobot.session.manager import SessionManager
 
@@ -107,6 +108,34 @@ class AgentLoop:
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
+
+        # Delegate side-effect tools to subagents
+        write_tool = WriteFileTool(allowed_dir=allowed_dir)
+        self.tools.register(DelegateTool(
+            name=write_tool.name,
+            description=f"{write_tool.description} (delegated to subagent)",
+            parameters=write_tool.parameters,
+            spawn_cb=self._spawn_subtask,
+            task_builder=self._build_subtask_task,
+        ))
+        edit_tool = EditFileTool(allowed_dir=allowed_dir)
+        self.tools.register(DelegateTool(
+            name=edit_tool.name,
+            description=f"{edit_tool.description} (delegated to subagent)",
+            parameters=edit_tool.parameters,
+            spawn_cb=self._spawn_subtask,
+            task_builder=self._build_subtask_task,
+        ))
+        if self.cron_service:
+            from nanobot.agent.tools.cron import CronTool
+            cron_tool = CronTool(self.cron_service)
+            self.tools.register(DelegateTool(
+                name=cron_tool.name,
+                description=f"{cron_tool.description} (delegated to subagent)",
+                parameters=cron_tool.parameters,
+                spawn_cb=self._spawn_subtask,
+                task_builder=self._build_subtask_task,
+            ))
         
         # Read-only shell tool (delegates when unsafe)
         self.tools.register(ReadOnlyExecTool(
@@ -861,6 +890,11 @@ class AgentLoop:
         exec_tool = self.tools.get("exec")
         if isinstance(exec_tool, ReadOnlyExecTool):
             exec_tool.set_context(msg.channel, msg.chat_id)
+
+        for name in ("write_file", "edit_file", "cron"):
+            delegate_tool = self.tools.get(name)
+            if isinstance(delegate_tool, DelegateTool):
+                delegate_tool.set_context(msg.channel, msg.chat_id)
         
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
@@ -913,13 +947,7 @@ class AgentLoop:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                        if tool_call.name in {"write_file", "edit_file", "cron"}:
-                            result = await self._delegate_tool_call(
-                                tool_call.name,
-                                tool_call.arguments,
-                                msg,
-                            )
-                        elif tool_call.name == "spawn":
+                        if tool_call.name == "spawn":
                             task = tool_call.arguments.get("task", "")
                             label = tool_call.arguments.get("label")
                             if not self._allow_spawn(msg, task, label):
@@ -1152,9 +1180,7 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    if tool_call.name in {"write_file", "edit_file", "cron"}:
-                        result = await self._delegate_tool_call(tool_call.name, tool_call.arguments, msg)
-                    elif tool_call.name == "spawn":
+                    if tool_call.name == "spawn":
                         task = tool_call.arguments.get("task", "")
                         label = tool_call.arguments.get("label")
                         if not self._allow_spawn(msg, task, label):
