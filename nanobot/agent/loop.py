@@ -74,7 +74,7 @@ class AgentLoop:
         self.active_subtasks: dict[str, dict[str, Any]] = {}
         self.completed_subtasks: dict[str, dict[str, Any]] = {}
         self.completed_subtasks_order: list[str] = []
-        self.completed_subtasks_limit = 50
+        self.completed_subtasks_limit = 10
         self._spawned_this_turn: list[dict[str, Any]] = []
         self._current_session_model: str | None = None
         self._current_session_subtask_model: str | None = None
