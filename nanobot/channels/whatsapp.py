@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections import deque
 from typing import Any
 
 from loguru import logger
@@ -27,6 +28,9 @@ class WhatsAppChannel(BaseChannel):
         self.config: WhatsAppConfig = config
         self._ws = None
         self._connected = False
+        self._seen_message_ids: deque[str] = deque()
+        self._seen_message_ids_set: set[str] = set()
+        self._seen_message_ids_limit = 200
     
     async def start(self) -> None:
         """Start the WhatsApp channel by connecting to the bridge."""
@@ -118,6 +122,17 @@ class WhatsAppChannel(BaseChannel):
             # New LID sytle typically: 
             sender = data.get("sender", "")
             content = data.get("content", "")
+            message_id = data.get("id")
+
+            if message_id:
+                if message_id in self._seen_message_ids_set:
+                    logger.debug(f"Duplicate WhatsApp message ignored: {message_id}")
+                    return
+                self._seen_message_ids.append(message_id)
+                self._seen_message_ids_set.add(message_id)
+                while len(self._seen_message_ids) > self._seen_message_ids_limit:
+                    dropped = self._seen_message_ids.popleft()
+                    self._seen_message_ids_set.discard(dropped)
             
             # Extract just the phone number or lid as chat_id
             user_id = pn if pn else sender
@@ -134,7 +149,7 @@ class WhatsAppChannel(BaseChannel):
                 chat_id=sender,  # Use full LID for replies
                 content=content,
                 metadata={
-                    "message_id": data.get("id"),
+                    "message_id": message_id,
                     "timestamp": data.get("timestamp"),
                     "is_group": data.get("isGroup", False)
                 }
