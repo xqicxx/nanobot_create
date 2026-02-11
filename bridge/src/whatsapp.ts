@@ -279,6 +279,20 @@ export class WhatsAppClient {
     await this.sock.sendMessage(to, { text });
   }
 
+  async sendPresence(to: string, presence: 'composing' | 'paused' | 'available'): Promise<void> {
+    if (!this.sock?.sendPresenceUpdate) return;
+    const targets = [to];
+    const alt = this.altFor(to);
+    if (alt) targets.push(alt);
+    for (const jid of targets) {
+      try {
+        await this.sock.sendPresenceUpdate(presence, jid);
+      } catch (err) {
+        if (WA_DEBUG) console.error('sendPresenceUpdate failed:', err);
+      }
+    }
+  }
+
   async disconnect(): Promise<void> {
     if (this.sock) {
       this.sock.end(undefined);

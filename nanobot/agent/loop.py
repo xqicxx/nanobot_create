@@ -68,6 +68,7 @@ class AgentLoop:
         self.confirmations = ConfirmationStore(ttl_seconds=300)
         self.active_subtasks: dict[str, dict[str, Any]] = {}
         self._spawned_this_turn: list[dict[str, Any]] = []
+        self._current_session_model: str | None = None
         self._confirm_exec = ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
@@ -158,6 +159,141 @@ class AgentLoop:
             return match.group(1)
         return None
 
+    def _get_session_model(self, session: "Session") -> str:
+        model = session.metadata.get("model")
+        return model or self.model
+
+    def _list_configured_models(self, session: "Session", current_model: str) -> str:
+        from nanobot.config.loader import load_config
+        from nanobot.providers.registry import PROVIDERS
+
+        config = load_config()
+        default_model = config.agents.defaults.model
+        known_models = session.metadata.get("known_models") or []
+        merged: list[str] = []
+        for candidate in [current_model, default_model, *known_models]:
+            if candidate and candidate not in merged:
+                merged.append(candidate)
+
+        configured_providers: list[str] = []
+        for spec in PROVIDERS:
+            provider_cfg = getattr(config.providers, spec.name, None)
+            if not provider_cfg:
+                continue
+            has_key = bool(getattr(provider_cfg, "api_key", None))
+            has_base = bool(getattr(provider_cfg, "api_base", None))
+            if has_key or has_base:
+                configured_providers.append(spec.label)
+
+        lines = [
+            f"当前模型：{current_model}",
+            f"默认模型：{default_model}",
+        ]
+        if merged:
+            lines.append("已使用模型：" + ", ".join(merged))
+        if configured_providers:
+            lines.append("已配置提供商：" + ", ".join(configured_providers))
+        lines.append("用法：/model <模型名> | /model list | /model reset")
+        return "\n".join(lines)
+
+    def _handle_model_command(
+        self,
+        msg: InboundMessage,
+        session: "Session",
+        current_model: str,
+    ) -> OutboundMessage | None:
+        raw = msg.content.strip()
+        if not raw.startswith("/model"):
+            return None
+
+        parts = raw.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        arg_lower = arg.lower()
+
+        if not arg:
+            content = (
+                f"当前模型：{current_model}\n"
+                "用法：/model list | /model <模型名> | /model reset"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"list", "ls"}:
+            content = self._list_configured_models(session, current_model)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"reset", "default"}:
+            session.metadata.pop("model", None)
+            content = f"已恢复默认模型：{self.model}"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        # Set model override (per-session)
+        model_name = arg
+        if not self._model_is_configured(model_name):
+            content = (
+                f"模型不可用或未配置对应提供商：{model_name}\n"
+                "用法：/model list 查看可用提供商"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        session.metadata["model"] = model_name
+        known_models = session.metadata.get("known_models") or []
+        if model_name not in known_models:
+            known_models.append(model_name)
+            session.metadata["known_models"] = known_models
+        content = f"已切换模型：{model_name}"
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+    def _model_is_configured(self, model: str) -> bool:
+        from nanobot.config.loader import load_config
+        from nanobot.providers.registry import PROVIDERS, find_by_model, find_by_name
+
+        config = load_config()
+        model_lower = model.lower()
+        spec = find_by_model(model_lower)
+
+        if spec is None and "/" in model_lower:
+            prefix = model_lower.split("/", 1)[0]
+            spec = find_by_name(prefix)
+
+        if spec is not None:
+            provider_cfg = getattr(config.providers, spec.name, None)
+            if not provider_cfg:
+                return False
+            if getattr(provider_cfg, "api_key", None):
+                return True
+            if getattr(provider_cfg, "api_base", None):
+                return True
+            return False
+
+        # No direct provider match. Allow if any gateway/local provider is configured.
+        for candidate in PROVIDERS:
+            if not (candidate.is_gateway or candidate.is_local):
+                continue
+            provider_cfg = getattr(config.providers, candidate.name, None)
+            if not provider_cfg:
+                continue
+            if getattr(provider_cfg, "api_key", None) or getattr(provider_cfg, "api_base", None):
+                return True
+        return False
+
+    async def _send_presence(self, msg: InboundMessage, presence: str) -> None:
+        if msg.channel != "whatsapp":
+            return
+        try:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="",
+                metadata={"presence": presence},
+            ))
+        except Exception as e:
+            logger.debug(f"Failed to send presence update: {e}")
+
+    async def _presence_loop(self, msg: InboundMessage) -> None:
+        while True:
+            await self._send_presence(msg, "composing")
+            await asyncio.sleep(6)
+
     async def _handle_confirmation(self, confirm_id: str, msg: InboundMessage) -> OutboundMessage:
         record = self.confirmations.consume(confirm_id)
         if not record:
@@ -197,6 +333,7 @@ class AgentLoop:
             label=label,
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,
+            model=self._current_session_model or self.model,
         )
         self.active_subtasks[result.task_id] = {
             "task": result.task,
@@ -294,6 +431,18 @@ class AgentLoop:
 
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
+        session_model = self._get_session_model(session)
+        self._current_session_model = session_model
+
+        # Handle /model commands before LLM
+        model_response = self._handle_model_command(msg, session, session_model)
+        if model_response:
+            # Save to session
+            session.add_message("user", msg.content)
+            session.add_message("assistant", model_response.content)
+            self.sessions.save(session)
+            self._current_session_model = None
+            return model_response
         
         # Update tool contexts
         message_tool = self.tools.get("message")
@@ -320,61 +469,74 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
+        typing_task: asyncio.Task[None] | None = None
+
+        if msg.channel == "whatsapp":
+            typing_task = asyncio.create_task(self._presence_loop(msg))
         
-        while iteration < self.max_iterations:
-            iteration += 1
-            
-            # Call LLM
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
-            )
-            
-            # Handle tool calls
-            if response.has_tool_calls:
-                # Add assistant message with tool calls
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
-                        }
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
+        try:
+            while iteration < self.max_iterations:
+                iteration += 1
+                
+                # Call LLM
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=self.tools.get_definitions(),
+                    model=session_model
                 )
                 
-                # Execute tools
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    if tool_call.name in {"write_file", "edit_file", "cron"}:
-                        result = await self._delegate_tool_call(
-                            tool_call.name,
-                            tool_call.arguments,
-                            msg,
-                            origin_channel=origin_channel,
-                            origin_chat_id=origin_chat_id,
-                        )
-                    else:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                # Handle tool calls
+                if response.has_tool_calls:
+                    # Add assistant message with tool calls
+                    tool_call_dicts = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments)  # Must be JSON string
+                            }
+                        }
+                        for tc in response.tool_calls
+                    ]
+                    messages = self.context.add_assistant_message(
+                        messages, response.content, tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
                     )
+                    
+                    # Execute tools
+                    for tool_call in response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                        if tool_call.name in {"write_file", "edit_file", "cron"}:
+                            result = await self._delegate_tool_call(
+                                tool_call.name,
+                                tool_call.arguments,
+                                msg,
+                                origin_channel=origin_channel,
+                                origin_chat_id=origin_chat_id,
+                            )
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
 
-                if self._spawned_this_turn:
-                    final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                    if self._spawned_this_turn:
+                        final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                        break
+                else:
+                    # No tool calls, we're done
+                    final_content = response.content
                     break
-            else:
-                # No tool calls, we're done
-                final_content = response.content
-                break
+        finally:
+            if typing_task:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+                await self._send_presence(msg, "paused")
         
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
@@ -387,6 +549,7 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
+        self._current_session_model = None
         
         return OutboundMessage(
             channel=msg.channel,
@@ -403,6 +566,8 @@ class AgentLoop:
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
+        # Reset per-turn spawn tracking for system messages too
+        self._spawned_this_turn = []
         
         # Parse origin from chat_id (format: "channel:chat_id")
         if ":" in msg.chat_id:
@@ -493,7 +658,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=self._get_session_model(session)
             )
             
             if response.has_tool_calls:
@@ -523,6 +688,10 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                if self._spawned_this_turn:
+                    final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                    break
             else:
                 final_content = response.content
                 break

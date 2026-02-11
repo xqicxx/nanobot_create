@@ -73,6 +73,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        model: str | None = None,
     ) -> SpawnResult:
         """
         Spawn a subagent to execute a task in the background.
@@ -96,7 +97,7 @@ class SubagentManager:
         
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, model=model)
         )
         self._running_tasks[task_id] = bg_task
         
@@ -117,9 +118,11 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        model: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
+        effective_model = model or self.model
         
         evidence_items: list[str] = []
         exit_code: int | None = None
@@ -206,7 +209,7 @@ class SubagentManager:
                 response = await self.provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
-                    model=self.model,
+                    model=effective_model,
                 )
                 
                 if response.has_tool_calls:

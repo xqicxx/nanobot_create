@@ -11,6 +11,14 @@ interface SendCommand {
   text: string;
 }
 
+interface PresenceCommand {
+  type: 'presence';
+  to: string;
+  presence: 'composing' | 'paused' | 'available';
+}
+
+type BridgeCommand = SendCommand | PresenceCommand;
+
 interface BridgeMessage {
   type: 'message' | 'status' | 'qr' | 'error';
   [key: string]: unknown;
@@ -43,7 +51,7 @@ export class BridgeServer {
 
       ws.on('message', async (data) => {
         try {
-          const cmd = JSON.parse(data.toString()) as SendCommand;
+          const cmd = JSON.parse(data.toString()) as BridgeCommand;
           await this.handleCommand(cmd);
           ws.send(JSON.stringify({ type: 'sent', to: cmd.to }));
         } catch (error) {
@@ -67,9 +75,14 @@ export class BridgeServer {
     await this.wa.connect();
   }
 
-  private async handleCommand(cmd: SendCommand): Promise<void> {
-    if (cmd.type === 'send' && this.wa) {
+  private async handleCommand(cmd: BridgeCommand): Promise<void> {
+    if (!this.wa) return;
+    if (cmd.type === 'send') {
       await this.wa.sendMessage(cmd.to, cmd.text);
+      return;
+    }
+    if (cmd.type === 'presence') {
+      await this.wa.sendPresence(cmd.to, cmd.presence);
     }
   }
 

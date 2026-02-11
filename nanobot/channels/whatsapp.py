@@ -79,6 +79,19 @@ class WhatsAppChannel(BaseChannel):
             return
         
         try:
+            presence = msg.metadata.get("presence") if msg.metadata else None
+            if presence:
+                payload = {
+                    "type": "presence",
+                    "to": msg.chat_id,
+                    "presence": presence,
+                }
+                await self._ws.send(json.dumps(payload))
+                return
+
+            if not msg.content:
+                return
+
             payload = {
                 "type": "send",
                 "to": msg.chat_id,
