@@ -843,7 +843,7 @@ class AgentLoop:
                     final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
                     break
 
-        if self._should_force_web_search(msg):
+                if self._should_force_web_search(msg):
                     if not self.brave_api_key:
                         final_content = "搜索未配置：请设置 BRAVE_API_KEY 或 config.tools.web.search.apiKey。"
                         break
