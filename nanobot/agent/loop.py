@@ -354,7 +354,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/subtask list | /subtask recent | /subtask <task_id> | /subtask run <任务>"
+            content = "用法：/subtask list | /subtask recent | /subtask <task_id> | /subtask run <任务> | /subtask clear"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         task_id = arg
@@ -429,6 +429,13 @@ class AgentLoop:
         if arg_lower in {"list", "ls"}:
             content = self._list_configured_models(
                 session, current_model, self._get_session_subtask_model(session)
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"help", "?"}:
+            content = (
+                "用法：/model list | /model <模型名> | /model reset\n"
+                "子任务：/model sub <模型名> | /model sub reset"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 

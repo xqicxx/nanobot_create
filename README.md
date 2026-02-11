@@ -678,6 +678,7 @@ These are message commands you can send to the bot in chat channels:
 |---------|-------------|
 | `/model list` | Show current/default model and configured providers |
 | `/model <name>` | Switch model for the current session |
+| `/model help` | Show model command help |
 | `/model reset` | Reset session model to default |
 | `/model sub <name>` | Switch subtask model for the current session |
 | `/model sub reset` | Reset subtask model to default |
@@ -686,6 +687,7 @@ These are message commands you can send to the bot in chat channels:
 | `/subtask <id>` | Show details for a specific subtask |
 | `/subtask run <task>` | Force-create a subtask |
 | `/subtask clear` | Clear recent subtask history (running tasks unaffected) |
+| `/subtask help` | Show subtask command help |
 | `/version` | Show running package path + git version |
 
 Notes:
