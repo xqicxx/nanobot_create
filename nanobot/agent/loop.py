@@ -211,6 +211,8 @@ class AgentLoop:
             r"\\b(upload|download|clone|pull|push)\\b",
             r"\\b(写|改|修改|编辑|删除|移除|安装|编译|部署|启动|停止|替换|追加|覆盖|创建|更新|上传|下载)\\b",
             r"\\b(configure|configuration|set up|setup)\\b",
+            r"\\b(order|purchase|buy|pay|transfer|send)\\b",
+            r"(下单|点餐|点外卖|点奶茶|购买|付款|支付|转账|发红包|发送|通知|预约)",
         ]
         if any(re.search(p, text, re.IGNORECASE) for p in patterns):
             return True
@@ -345,7 +347,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/subtask list | /subtask recent | /subtask <task_id>"
+            content = "用法：/subtask list | /subtask recent | /subtask <task_id> | /subtask run <任务>"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         task_id = arg
@@ -617,8 +619,6 @@ class AgentLoop:
         return False
 
     def _should_force_web_search(self, msg: InboundMessage) -> bool:
-        if not self.brave_api_key:
-            return False
         user_text = msg.content or ""
         if not user_text.strip():
             return False
@@ -629,12 +629,42 @@ class AgentLoop:
             r"\\bgoogle\\b",
             r"\\bbing\\b",
             r"搜索",
+            r"搜",
             r"搜一下",
             r"查询",
             r"查一下",
             r"查找",
         ]
         return any(re.search(p, user_text, re.IGNORECASE) for p in patterns)
+
+    def _handle_version_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        raw = (msg.content or "").strip()
+        if raw not in {"/version", "/ver"}:
+            return None
+        try:
+            import nanobot
+            package_path = Path(nanobot.__file__).resolve()
+        except Exception:
+            package_path = None
+        commit = "unknown"
+        if package_path:
+            for parent in package_path.parents:
+                git_dir = parent / ".git"
+                if git_dir.is_dir():
+                    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+                    if head.startswith("ref:"):
+                        ref = head.split(":", 1)[1].strip()
+                        ref_path = git_dir / ref
+                        if ref_path.exists():
+                            commit = ref_path.read_text(encoding="utf-8").strip()[:8]
+                    else:
+                        commit = head[:8]
+                    break
+        content = "nanobot 版本信息："
+        if package_path:
+            content += f"\n路径：{package_path}"
+        content += f"\nGit：{commit}"
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
@@ -656,6 +686,35 @@ class AgentLoop:
         if confirm_id:
             return await self._handle_confirmation(confirm_id, msg)
 
+        # Reset per-turn spawn tracking early
+        self._spawned_this_turn = []
+
+        # Handle /version command before LLM
+        version_response = self._handle_version_command(msg)
+        if version_response:
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", version_response.content)
+            self.sessions.save(session)
+            return version_response
+
+        # Handle /subtask run|spawn before LLM
+        raw = (msg.content or "").strip()
+        if raw.startswith("/subtask"):
+            parts = raw.split(None, 2)
+            if len(parts) >= 3 and parts[1].lower() in {"run", "spawn"}:
+                task = parts[2].strip()
+                if task:
+                    await self._spawn_subtask(task, "subtask", msg.channel, msg.chat_id)
+                    content = self._build_spawn_ack(task, self._spawned_this_turn)
+                else:
+                    content = "用法：/subtask run <任务内容>"
+                session = self.sessions.get_or_create(msg.session_key)
+                session.add_message("user", msg.content)
+                session.add_message("assistant", content)
+                self.sessions.save(session)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
         # Handle /subtask commands before LLM
         subtask_response = self._handle_subtask_command(msg)
         if subtask_response:
@@ -667,9 +726,6 @@ class AgentLoop:
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
-        # Reset per-turn spawn tracking
-        self._spawned_this_turn = []
 
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
@@ -787,7 +843,10 @@ class AgentLoop:
                     final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
                     break
 
-                if self._should_force_web_search(msg):
+        if self._should_force_web_search(msg):
+                    if not self.brave_api_key:
+                        final_content = "搜索未配置：请设置 BRAVE_API_KEY 或 config.tools.web.search.apiKey。"
+                        break
                     result = await self.tools.execute(
                         "web_search",
                         {"query": msg.content, "count": 5},
@@ -808,7 +867,18 @@ class AgentLoop:
         
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
+        if (
+            "## 我懂你的意思" in final_content
+            or "## 我打算怎么做" in final_content
+            or "## 我先去干活" in final_content
+        ):
+            match = re.search(r"你想做的是[:：]\\s*(.*)", final_content)
+            summary = match.group(1).strip() if match else (msg.content or "").strip()
+            if not summary:
+                summary = "已收到你的需求"
+            final_content = f"收到：{summary}"
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
