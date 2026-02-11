@@ -615,6 +615,26 @@ class AgentLoop:
         if self._looks_like_side_effect(user_text):
             return True
         return False
+
+    def _should_force_web_search(self, msg: InboundMessage) -> bool:
+        if not self.brave_api_key:
+            return False
+        user_text = msg.content or ""
+        if not user_text.strip():
+            return False
+        if user_text.strip().startswith("/"):
+            return False
+        patterns = [
+            r"\\bsearch\\b",
+            r"\\bgoogle\\b",
+            r"\\bbing\\b",
+            r"搜索",
+            r"搜一下",
+            r"查询",
+            r"查一下",
+            r"查找",
+        ]
+        return any(re.search(p, user_text, re.IGNORECASE) for p in patterns)
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
@@ -765,6 +785,14 @@ class AgentLoop:
                 if self._should_force_subtask(msg):
                     await self._spawn_subtask(msg.content, "subtask", msg.channel, msg.chat_id)
                     final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                    break
+
+                if self._should_force_web_search(msg):
+                    result = await self.tools.execute(
+                        "web_search",
+                        {"query": msg.content, "count": 5},
+                    )
+                    final_content = result
                     break
 
                 final_content = response.content
