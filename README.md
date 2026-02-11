@@ -685,6 +685,7 @@ These are message commands you can send to the bot in chat channels:
 | `/subtask recent` | Show recent completed subtasks (last 5) |
 | `/subtask <id>` | Show details for a specific subtask |
 | `/subtask run <task>` | Force-create a subtask |
+| `/subtask clear` | Clear recent subtask history (running tasks unaffected) |
 | `/version` | Show running package path + git version |
 
 Notes:

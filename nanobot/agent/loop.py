@@ -347,6 +347,12 @@ class AgentLoop:
             content = "最近完成：\n" + "\n".join(lines)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
+        if arg_lower in {"clear", "purge"}:
+            self.completed_subtasks.clear()
+            self.completed_subtasks_order.clear()
+            content = "已清空最近子任务记录。正在运行的子任务不受影响。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
         if arg_lower in {"help", "?"}:
             content = "用法：/subtask list | /subtask recent | /subtask <task_id> | /subtask run <任务>"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
