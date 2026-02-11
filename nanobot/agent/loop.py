@@ -43,6 +43,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
+        subtask_model: str | None = None,
         max_iterations: int = 20,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
@@ -56,6 +57,7 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.subtask_model = subtask_model
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
@@ -69,6 +71,7 @@ class AgentLoop:
         self.active_subtasks: dict[str, dict[str, Any]] = {}
         self._spawned_this_turn: list[dict[str, Any]] = []
         self._current_session_model: str | None = None
+        self._current_session_subtask_model: str | None = None
         self._confirm_exec = ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
@@ -81,7 +84,7 @@ class AgentLoop:
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self.subtask_model or self.model,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
@@ -163,17 +166,52 @@ class AgentLoop:
         model = session.metadata.get("model")
         return model or self.model
 
-    def _list_configured_models(self, session: "Session", current_model: str) -> str:
+    def _get_session_subtask_model(self, session: "Session") -> str:
+        model = session.metadata.get("subtask_model")
+        return model or self.subtask_model or self._get_session_model(session)
+
+    def _looks_like_side_effect(self, text: str) -> bool:
+        if not text:
+            return False
+        patterns = [
+            r"\\b(write|edit|modify|change|delete|remove|rm|install|run|execute|exec|build|deploy|start|stop)\\b",
+            r"\\b(create|update|patch|replace|append|overwrite)\\b",
+            r"\\b(upload|download|clone|pull|push)\\b",
+            r"\\b(写|改|修改|编辑|删除|移除|安装|运行|执行|编译|部署|启动|停止|替换|追加|覆盖|创建|更新|上传|下载)\\b",
+        ]
+        return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+    def _allow_spawn(self, msg: InboundMessage, task: str, label: str | None) -> bool:
+        user_text = msg.content or ""
+        if re.search(r"\\b(subtask|delegate|spawn)\\b", user_text, re.IGNORECASE):
+            return True
+        if "子任务" in user_text or "分派" in user_text or "交给子任务" in user_text:
+            return True
+        if self._looks_like_side_effect(user_text):
+            return True
+        if self._looks_like_side_effect(task):
+            return True
+        if label and self._looks_like_side_effect(label):
+            return True
+        return False
+
+    def _list_configured_models(self, session: "Session", current_model: str, current_subtask_model: str) -> str:
         from nanobot.config.loader import load_config
         from nanobot.providers.registry import PROVIDERS
 
         config = load_config()
         default_model = config.agents.defaults.model
+        default_subtask_model = config.agents.subtask.model or default_model
         known_models = session.metadata.get("known_models") or []
+        known_subtask_models = session.metadata.get("known_subtask_models") or []
         merged: list[str] = []
         for candidate in [current_model, default_model, *known_models]:
             if candidate and candidate not in merged:
                 merged.append(candidate)
+        merged_subtask: list[str] = []
+        for candidate in [current_subtask_model, default_subtask_model, *known_subtask_models]:
+            if candidate and candidate not in merged_subtask:
+                merged_subtask.append(candidate)
 
         configured_providers: list[str] = []
         for spec in PROVIDERS:
@@ -188,13 +226,53 @@ class AgentLoop:
         lines = [
             f"当前模型：{current_model}",
             f"默认模型：{default_model}",
+            f"子任务模型：{current_subtask_model}",
+            f"子任务默认模型：{default_subtask_model}",
         ]
         if merged:
             lines.append("已使用模型：" + ", ".join(merged))
+        if merged_subtask:
+            lines.append("已使用子任务模型：" + ", ".join(merged_subtask))
         if configured_providers:
             lines.append("已配置提供商：" + ", ".join(configured_providers))
         lines.append("用法：/model <模型名> | /model list | /model reset")
+        lines.append("子任务：/model sub <模型名> | /model sub reset")
         return "\n".join(lines)
+
+    def _handle_subtask_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        raw = msg.content.strip()
+        if not raw.startswith("/subtask"):
+            return None
+
+        parts = raw.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        arg_lower = arg.lower()
+
+        if not arg or arg_lower in {"list", "ls"}:
+            if not self.active_subtasks:
+                content = "当前没有在跑的子任务。"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            items = []
+            for task_id, info in self.active_subtasks.items():
+                label = info.get("label") or "subtask"
+                task = info.get("task") or ""
+                items.append(f"- {label} (id: {task_id}): {task[:80]}")
+            content = "正在运行的子任务：\n" + "\n".join(items)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"help", "?"}:
+            content = "用法：/subtask list | /subtask <task_id>"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        task_id = arg
+        info = self.active_subtasks.get(task_id)
+        if not info:
+            content = f"未找到子任务：{task_id}"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        label = info.get("label") or "subtask"
+        task = info.get("task") or ""
+        content = f"子任务 {label} (id: {task_id})：\n{task}"
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     def _handle_model_command(
         self,
@@ -213,12 +291,45 @@ class AgentLoop:
         if not arg:
             content = (
                 f"当前模型：{current_model}\n"
-                "用法：/model list | /model <模型名> | /model reset"
+                f"子任务模型：{self._get_session_subtask_model(session)}\n"
+                "用法：/model list | /model <模型名> | /model reset\n"
+                "子任务：/model sub <模型名> | /model sub reset"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
+        if arg_lower.startswith("sub"):
+            sub_parts = arg.split(None, 1)
+            sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+            sub_lower = sub_arg.lower()
+            if not sub_arg:
+                content = (
+                    f"子任务模型：{self._get_session_subtask_model(session)}\n"
+                    "用法：/model sub <模型名> | /model sub reset"
+                )
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            if sub_lower in {"reset", "default"}:
+                session.metadata.pop("subtask_model", None)
+                content = f"已恢复子任务默认模型：{self.subtask_model or self.model}"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            model_name = sub_arg
+            if not self._model_is_configured(model_name):
+                content = (
+                    f"子任务模型不可用或未配置对应提供商：{model_name}\n"
+                    "用法：/model list 查看可用提供商"
+                )
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            session.metadata["subtask_model"] = model_name
+            known_subtask = session.metadata.get("known_subtask_models") or []
+            if model_name not in known_subtask:
+                known_subtask.append(model_name)
+                session.metadata["known_subtask_models"] = known_subtask
+            content = f"已切换子任务模型：{model_name}"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
         if arg_lower in {"list", "ls"}:
-            content = self._list_configured_models(session, current_model)
+            content = self._list_configured_models(
+                session, current_model, self._get_session_subtask_model(session)
+            )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"reset", "default"}:
@@ -333,7 +444,7 @@ class AgentLoop:
             label=label,
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,
-            model=self._current_session_model or self.model,
+            model=self._current_session_subtask_model or self._current_session_model or self.model,
         )
         self.active_subtasks[result.task_id] = {
             "task": result.task,
@@ -390,7 +501,10 @@ class AgentLoop:
             clean = " ".join(text.split())
             return clean if len(clean) <= max_len else clean[:max_len] + "..."
 
-        tasks = "\n".join([f"- {item['label']}: {_summarize(item['task'])}" for item in spawned])
+        tasks = "\n".join([
+            f"- {item['label']} (id: {item['task_id']}): {_summarize(item['task'])}"
+            for item in spawned
+        ])
         first = spawned[0]["label"] if spawned else "子任务"
         return (
             "## 我懂你的意思\n"
@@ -422,6 +536,15 @@ class AgentLoop:
         confirm_id = self._extract_confirmation_id(msg.content)
         if confirm_id:
             return await self._handle_confirmation(confirm_id, msg)
+
+        # Handle /subtask commands before LLM
+        subtask_response = self._handle_subtask_command(msg)
+        if subtask_response:
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", subtask_response.content)
+            self.sessions.save(session)
+            return subtask_response
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
@@ -433,6 +556,7 @@ class AgentLoop:
         session = self.sessions.get_or_create(msg.session_key)
         session_model = self._get_session_model(session)
         self._current_session_model = session_model
+        self._current_session_subtask_model = self._get_session_subtask_model(session)
 
         # Handle /model commands before LLM
         model_response = self._handle_model_command(msg, session, session_model)
@@ -442,6 +566,7 @@ class AgentLoop:
             session.add_message("assistant", model_response.content)
             self.sessions.save(session)
             self._current_session_model = None
+            self._current_session_subtask_model = None
             return model_response
         
         # Update tool contexts
@@ -505,22 +630,29 @@ class AgentLoop:
                     )
                     
                     # Execute tools
-                    for tool_call in response.tool_calls:
-                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                        logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                        if tool_call.name in {"write_file", "edit_file", "cron"}:
-                            result = await self._delegate_tool_call(
-                                tool_call.name,
-                                tool_call.arguments,
-                                msg,
-                                origin_channel=origin_channel,
-                                origin_chat_id=origin_chat_id,
-                            )
+                for tool_call in response.tool_calls:
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    if tool_call.name in {"write_file", "edit_file", "cron"}:
+                        result = await self._delegate_tool_call(
+                            tool_call.name,
+                            tool_call.arguments,
+                            msg,
+                            origin_channel=origin_channel,
+                            origin_chat_id=origin_chat_id,
+                        )
+                    elif tool_call.name == "spawn":
+                        task = tool_call.arguments.get("task", "")
+                        label = tool_call.arguments.get("label")
+                        if not self._allow_spawn(msg, task, label):
+                            result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
                         else:
                             result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                        messages = self.context.add_tool_result(
-                            messages, tool_call.id, tool_call.name, result
-                        )
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
 
                     if self._spawned_this_turn:
                         final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
@@ -550,6 +682,7 @@ class AgentLoop:
         session.add_message("assistant", final_content)
         self.sessions.save(session)
         self._current_session_model = None
+        self._current_session_subtask_model = None
         
         return OutboundMessage(
             channel=msg.channel,
@@ -582,6 +715,9 @@ class AgentLoop:
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
+        session_model = self._get_session_model(session)
+        self._current_session_model = session_model
+        self._current_session_subtask_model = self._get_session_subtask_model(session)
 
         task_id = (msg.metadata or {}).get("task_id")
         if task_id and task_id in self.active_subtasks:
@@ -658,7 +794,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self._get_session_model(session)
+                model=session_model
             )
             
             if response.has_tool_calls:
@@ -683,6 +819,13 @@ class AgentLoop:
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     if tool_call.name in {"write_file", "edit_file", "cron"}:
                         result = await self._delegate_tool_call(tool_call.name, tool_call.arguments, msg)
+                    elif tool_call.name == "spawn":
+                        task = tool_call.arguments.get("task", "")
+                        label = tool_call.arguments.get("label")
+                        if not self._allow_spawn(msg, task, label):
+                            result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     else:
                         result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
@@ -703,6 +846,8 @@ class AgentLoop:
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
+        self._current_session_model = None
+        self._current_session_subtask_model = None
         
         return OutboundMessage(
             channel=origin_channel,

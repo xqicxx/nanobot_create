@@ -163,9 +163,15 @@ class AgentDefaults(BaseModel):
     max_tool_iterations: int = 20
 
 
+class SubtaskConfig(BaseModel):
+    """Subtask (subagent) configuration."""
+    model: str | None = None
+
+
 class AgentsConfig(BaseModel):
     """Agent configuration."""
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    subtask: SubtaskConfig = Field(default_factory=SubtaskConfig)
 
 
 class ProviderConfig(BaseModel):
