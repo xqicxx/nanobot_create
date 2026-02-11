@@ -670,6 +670,27 @@ That's it! Environment variables, model prefixing, config matching, and `nanobot
 
 Interactive mode exits: `exit`, `quit`, `/exit`, `/quit`, `:q`, or `Ctrl+D`.
 
+### Chat Commands (Channels)
+
+These are message commands you can send to the bot in chat channels:
+
+| Command | Description |
+|---------|-------------|
+| `/model list` | Show current/default model and configured providers |
+| `/model <name>` | Switch model for the current session |
+| `/model reset` | Reset session model to default |
+| `/model sub <name>` | Switch subtask model for the current session |
+| `/model sub reset` | Reset subtask model to default |
+| `/subtask list` | Show running subtasks + recent history (last 5) |
+| `/subtask recent` | Show recent completed subtasks (last 5) |
+| `/subtask <id>` | Show details for a specific subtask |
+| `/subtask run <task>` | Force-create a subtask |
+| `/version` | Show running package path + git version |
+
+Notes:
+- Web search uses Brave Search and requires `BRAVE_API_KEY` (or `tools.web.search.apiKey` in config).
+- Weather queries (e.g. “北京天气”) use `wttr.in` directly and do not require an API key.
+
 <details>
 <summary><b>Scheduled Tasks (Cron)</b></summary>
 
