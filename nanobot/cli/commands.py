@@ -328,6 +328,9 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nanobot gateway."""
+    import atexit
+    import os
+    import time
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
@@ -344,6 +347,27 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
     config = load_config()
+
+    # Prevent multiple gateway instances (causes duplicate replies and mismatched subtask state)
+    lock_path = get_data_dir() / "gateway.lock"
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip().splitlines()[0])
+        except Exception:
+            existing_pid = None
+        if existing_pid:
+            try:
+                os.kill(existing_pid, 0)
+                console.print(f"[red]Error: gateway already running (pid {existing_pid}).[/red]")
+                console.print("Stop it first or remove the lock file: " + str(lock_path))
+                raise typer.Exit(1)
+            except ProcessLookupError:
+                lock_path.unlink(missing_ok=True)
+        else:
+            lock_path.unlink(missing_ok=True)
+
+    lock_path.write_text(f\"{os.getpid()}\\n{int(time.time())}\\n\")
+    atexit.register(lambda: lock_path.unlink(missing_ok=True))
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
