@@ -210,8 +210,21 @@ class AgentLoop:
             r"\\b(create|update|patch|replace|append|overwrite)\\b",
             r"\\b(upload|download|clone|pull|push)\\b",
             r"\\b(写|改|修改|编辑|删除|移除|安装|编译|部署|启动|停止|替换|追加|覆盖|创建|更新|上传|下载)\\b",
+            r"\\b(configure|configuration|set up|setup)\\b",
         ]
-        return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+        if any(re.search(p, text, re.IGNORECASE) for p in patterns):
+            return True
+        if re.search(r"\\.(json|ya?ml|toml|ini|env|cfg|conf)\\b", text, re.IGNORECASE):
+            return True
+        if re.search(r"(配置|设置|环境变量)", text) and re.search(
+            r"(改|写|填|设置|更新|添加|替换|修改)", text
+        ):
+            return True
+        if re.search(r"(api|key|token|密钥|令牌)", text, re.IGNORECASE) and re.search(
+            r"(填|写|改|更新|设置|添加|替换)", text
+        ):
+            return True
+        return False
 
     def _looks_like_readonly(self, text: str) -> bool:
         if not text:
@@ -579,21 +592,29 @@ class AgentLoop:
             clean = " ".join(text.split())
             return clean if len(clean) <= max_len else clean[:max_len] + "..."
 
-        tasks = "\n".join([
+        if not spawned:
+            return "未能启动子任务，请重试或补充说明。"
+        tasks = "\n".join(
             f"- {item['label']} (id: {item['task_id']}): {_summarize(item['task'])}"
             for item in spawned
-        ])
-        first = spawned[0]["label"] if spawned else "子任务"
-        return (
-            "## 我懂你的意思\n"
-            f"- 你想做的是：{user_request.strip()}\n\n"
-            "## 我打算怎么做\n"
-            f"{tasks}\n\n"
-            "## 我先去干活\n"
-            f"- 先让子任务执行：{first}\n\n"
-            "## 等我消息\n"
-            "- 我拿到结果会帮你验一遍再回复"
         )
+        return (
+            "已分派子任务：\n"
+            f"{tasks}\n"
+            "用 /subtask list 查看进度，用 /subtask <id> 查看详情。"
+        )
+
+    def _should_force_subtask(self, msg: InboundMessage) -> bool:
+        user_text = msg.content or ""
+        if not user_text.strip():
+            return False
+        if user_text.strip().startswith("/"):
+            return False
+        if self._looks_like_readonly(user_text):
+            return False
+        if self._looks_like_side_effect(user_text):
+            return True
+        return False
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
@@ -708,37 +729,46 @@ class AgentLoop:
                     )
                     
                     # Execute tools
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    if tool_call.name in {"write_file", "edit_file", "cron"}:
-                        result = await self._delegate_tool_call(
-                            tool_call.name,
-                            tool_call.arguments,
-                            msg,
-                            origin_channel=origin_channel,
-                            origin_chat_id=origin_chat_id,
-                        )
-                    elif tool_call.name == "spawn":
-                        task = tool_call.arguments.get("task", "")
-                        label = tool_call.arguments.get("label")
-                        if not self._allow_spawn(msg, task, label):
-                            result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
+                    for tool_call in response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                        if tool_call.name in {"write_file", "edit_file", "cron"}:
+                            result = await self._delegate_tool_call(
+                                tool_call.name,
+                                tool_call.arguments,
+                                msg,
+                            )
+                        elif tool_call.name == "spawn":
+                            task = tool_call.arguments.get("task", "")
+                            label = tool_call.arguments.get("label")
+                            if not self._allow_spawn(msg, task, label):
+                                result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
+                            else:
+                                result = await self.tools.execute(tool_call.name, tool_call.arguments)
                         else:
                             result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    else:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+
+                        if self._spawned_this_turn:
+                            final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+                            break
 
                     if self._spawned_this_turn:
-                        final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
                         break
-                else:
-                    # No tool calls, we're done
-                    final_content = response.content
+
+                    # Continue loop after tool execution
+                    continue
+
+                # No tool calls: decide whether to force a subtask
+                if self._should_force_subtask(msg):
+                    await self._spawn_subtask(msg.content, "subtask", msg.channel, msg.chat_id)
+                    final_content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
                     break
+
+                final_content = response.content
+                break
         finally:
             if typing_task:
                 typing_task.cancel()
