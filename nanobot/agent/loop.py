@@ -612,6 +612,8 @@ class AgentLoop:
             return False
         if user_text.strip().startswith("/"):
             return False
+        if self._wants_subtask_spawn(user_text):
+            return True
         if self._looks_like_readonly(user_text):
             return False
         if self._looks_like_side_effect(user_text):
@@ -623,6 +625,8 @@ class AgentLoop:
         if not user_text.strip():
             return False
         if user_text.strip().startswith("/"):
+            return False
+        if self._wants_subtask_spawn(user_text):
             return False
         patterns = [
             r"\\bsearch\\b",
@@ -636,6 +640,18 @@ class AgentLoop:
             r"查找",
         ]
         return any(re.search(p, user_text, re.IGNORECASE) for p in patterns)
+
+    def _wants_subtask_spawn(self, text: str) -> bool:
+        if not text:
+            return False
+        if text.strip().startswith("/"):
+            return False
+        patterns = [
+            r"(创建|开|开启|启动|分派|派|交给|生成).{0,4}子任务",
+            r"子任务.*(执行|处理|帮我|代办)",
+            r"\\b(create|spawn|delegate)\\s+subtask\\b",
+        ]
+        return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 
     def _handle_version_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
@@ -714,6 +730,16 @@ class AgentLoop:
                 session.add_message("assistant", content)
                 self.sessions.save(session)
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        # Handle explicit subtask intent before LLM
+        if self._wants_subtask_spawn(msg.content or ""):
+            await self._spawn_subtask(msg.content, "subtask", msg.channel, msg.chat_id)
+            content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         # Handle /subtask commands before LLM
         subtask_response = self._handle_subtask_command(msg)
