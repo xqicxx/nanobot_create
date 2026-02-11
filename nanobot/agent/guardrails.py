@@ -103,6 +103,41 @@ def _is_readonly_find(tokens: list[str]) -> bool:
     return True
 
 
+def _split_pipeline(command: str) -> list[list[str]] | None:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if "|" not in tokens:
+        return None
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for tok in tokens:
+        if tok == "|":
+            if not current:
+                return None
+            segments.append(current)
+            current = []
+        else:
+            current.append(tok)
+    if current:
+        segments.append(current)
+    return segments if len(segments) >= 2 else None
+
+
+def is_readonly_pipeline(command: str) -> bool:
+    segments = _split_pipeline(command)
+    if not segments:
+        return False
+    for seg in segments:
+        cmd = " ".join(seg)
+        if not is_readonly_command(cmd):
+            return False
+        if has_dangerous_shell_syntax(cmd):
+            return False
+    return True
+
+
 def is_readonly_command(command: str) -> bool:
     try:
         tokens = shlex.split(command)
@@ -117,13 +152,19 @@ def is_readonly_command(command: str) -> bool:
         return True
     if head == "find" and _is_readonly_find(tokens):
         return True
+    if is_readonly_pipeline(command):
+        return True
     return False
 
 
 def classify_command(command: str) -> CommandCheck:
+    readonly_allowed = is_readonly_command(command)
+    dangerous = has_dangerous_shell_syntax(command)
+    if dangerous and is_readonly_pipeline(command):
+        dangerous = False
     return CommandCheck(
-        readonly_allowed=is_readonly_command(command),
+        readonly_allowed=readonly_allowed,
         high_risk=is_high_risk_command(command),
         sensitive=has_sensitive_tokens(command),
-        dangerous_syntax=has_dangerous_shell_syntax(command),
+        dangerous_syntax=dangerous,
     )

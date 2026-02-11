@@ -103,10 +103,16 @@ class ReadOnlyExecTool(Tool):
                         "由于涉及敏感路径，为了安全，我将启动子任务进行受限访问。",
                     )
 
-        if check.dangerous_syntax or not check.readonly_allowed:
+        if check.dangerous_syntax:
             return await self._delegate(
                 command,
-                "命令不在只读白名单或包含危险语法，已改为子任务执行。",
+                "命令包含危险语法，已改为子任务执行。",
+            )
+
+        if not check.readonly_allowed:
+            return await self._delegate(
+                command,
+                "命令不在只读白名单，已改为子任务执行。",
             )
 
         return await self._runner.execute(command=command, working_dir=working_dir)

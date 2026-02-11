@@ -1004,6 +1004,7 @@ class AgentLoop:
         self._current_session_model = session_model
         self._current_session_subtask_model = self._get_session_subtask_model(session)
 
+        info: dict[str, Any] | None = None
         task_id = (msg.metadata or {}).get("task_id")
         if task_id:
             info = self.active_subtasks.pop(task_id, None)
@@ -1026,6 +1027,8 @@ class AgentLoop:
         # Fast-path failure/high-risk results without LLM
         parsed = parse_subtask_output(msg.content)
         status = parsed.get("status")
+        if not status and (msg.metadata or {}).get("status") == "ok":
+            status = "成功"
         if status in {"失败", "高风险拦截"}:
             response_text = ""
             if status == "高风险拦截" or "high_risk_command" in (msg.metadata or {}):
@@ -1057,6 +1060,25 @@ class AgentLoop:
             session.add_message("assistant", response_text)
             self.sessions.save(session)
 
+            return OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=response_text,
+            )
+
+        if status == "成功":
+            label = (msg.metadata or {}).get("label") or (info or {}).get("label") or "subtask"
+            conclusion = parsed.get("conclusion") or "已完成"
+            evidence = parsed.get("evidence") or "无"
+            response_text = (
+                f"子任务完成：{label} (id: {task_id})\n"
+                f"结论：{conclusion}\n"
+                f"证据：{evidence}"
+            )
+            session = self.sessions.get_or_create(session_key)
+            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
+            session.add_message("assistant", response_text)
+            self.sessions.save(session)
             return OutboundMessage(
                 channel=origin_channel,
                 chat_id=origin_chat_id,
