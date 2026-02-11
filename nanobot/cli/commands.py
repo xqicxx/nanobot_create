@@ -366,7 +366,7 @@ def gateway(
         else:
             lock_path.unlink(missing_ok=True)
 
-    lock_path.write_text(f\"{os.getpid()}\\n{int(time.time())}\\n\")
+    lock_path.write_text(f"{os.getpid()}\n{int(time.time())}\n")
     atexit.register(lambda: lock_path.unlink(missing_ok=True))
     bus = MessageBus()
     provider = _make_provider(config)
