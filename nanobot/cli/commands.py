@@ -359,6 +359,7 @@ def gateway(
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         subtask_model=config.agents.subtask.model,
+        subtask_timeout=config.agents.subtask.timeout_seconds,
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
@@ -468,6 +469,7 @@ def agent(
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         subtask_model=config.agents.subtask.model,
+        subtask_timeout=config.agents.subtask.timeout_seconds,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on

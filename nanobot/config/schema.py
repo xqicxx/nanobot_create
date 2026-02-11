@@ -166,6 +166,7 @@ class AgentDefaults(BaseModel):
 class SubtaskConfig(BaseModel):
     """Subtask (subagent) configuration."""
     model: str | None = None
+    timeout_seconds: int = 300
 
 
 class AgentsConfig(BaseModel):

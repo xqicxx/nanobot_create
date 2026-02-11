@@ -44,6 +44,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         subtask_model: str | None = None,
+        subtask_timeout: int | None = None,
         max_iterations: int = 20,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
@@ -58,6 +59,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.subtask_model = subtask_model
+        self.subtask_timeout = subtask_timeout
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
@@ -69,6 +71,9 @@ class AgentLoop:
         self.tools = ToolRegistry()
         self.confirmations = ConfirmationStore(ttl_seconds=300)
         self.active_subtasks: dict[str, dict[str, Any]] = {}
+        self.completed_subtasks: dict[str, dict[str, Any]] = {}
+        self.completed_subtasks_order: list[str] = []
+        self.completed_subtasks_limit = 50
         self._spawned_this_turn: list[dict[str, Any]] = []
         self._current_session_model: str | None = None
         self._current_session_subtask_model: str | None = None
@@ -85,6 +90,7 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.subtask_model or self.model,
+            timeout_seconds=self.subtask_timeout,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
@@ -170,23 +176,63 @@ class AgentLoop:
         model = session.metadata.get("subtask_model")
         return model or self.subtask_model or self._get_session_model(session)
 
+    def _truncate(self, text: str, max_len: int = 200) -> str:
+        clean = " ".join(text.split())
+        return clean if len(clean) <= max_len else clean[:max_len] + "..."
+
+    def _record_completed_subtask(
+        self,
+        task_id: str,
+        info: dict[str, Any] | None,
+        status: str,
+        result: str,
+    ) -> None:
+        entry = {
+            "task_id": task_id,
+            "label": (info or {}).get("label") or "subtask",
+            "task": (info or {}).get("task") or "",
+            "status": status,
+            "result": result,
+        }
+        self.completed_subtasks[task_id] = entry
+        if task_id in self.completed_subtasks_order:
+            self.completed_subtasks_order.remove(task_id)
+        self.completed_subtasks_order.insert(0, task_id)
+        if len(self.completed_subtasks_order) > self.completed_subtasks_limit:
+            drop = self.completed_subtasks_order.pop()
+            self.completed_subtasks.pop(drop, None)
+
     def _looks_like_side_effect(self, text: str) -> bool:
         if not text:
             return False
         patterns = [
-            r"\\b(write|edit|modify|change|delete|remove|rm|install|run|execute|exec|build|deploy|start|stop)\\b",
+            r"\\b(write|edit|modify|change|delete|remove|rm|install|exec|build|deploy|start|stop)\\b",
             r"\\b(create|update|patch|replace|append|overwrite)\\b",
             r"\\b(upload|download|clone|pull|push)\\b",
-            r"\\b(写|改|修改|编辑|删除|移除|安装|运行|执行|编译|部署|启动|停止|替换|追加|覆盖|创建|更新|上传|下载)\\b",
+            r"\\b(写|改|修改|编辑|删除|移除|安装|编译|部署|启动|停止|替换|追加|覆盖|创建|更新|上传|下载)\\b",
+        ]
+        return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+    def _looks_like_readonly(self, text: str) -> bool:
+        if not text:
+            return False
+        patterns = [
+            r"\\b(read|list|show|view|print|search|find|grep|rg|cat|ls)\\b",
+            r"\\b(read_file|list_dir|web_search|web_fetch)\\b",
+            r"\\b(查看|读取|列出|搜索|查询|浏览|检索|统计)\\b",
         ]
         return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 
     def _allow_spawn(self, msg: InboundMessage, task: str, label: str | None) -> bool:
         user_text = msg.content or ""
+        if user_text.strip().startswith("/") and not re.search(r"\\b(subtask|spawn)\\b", user_text, re.IGNORECASE):
+            return False
         if re.search(r"\\b(subtask|delegate|spawn)\\b", user_text, re.IGNORECASE):
             return True
         if "子任务" in user_text or "分派" in user_text or "交给子任务" in user_text:
             return True
+        if self._looks_like_readonly(user_text) or self._looks_like_readonly(task):
+            return False
         if self._looks_like_side_effect(user_text):
             return True
         if self._looks_like_side_effect(task):
@@ -249,29 +295,61 @@ class AgentLoop:
         arg_lower = arg.lower()
 
         if not arg or arg_lower in {"list", "ls"}:
-            if not self.active_subtasks:
-                content = "当前没有在跑的子任务。"
+            if not self.active_subtasks and not self.completed_subtasks_order:
+                content = "当前没有在跑的子任务，也没有最近的完成记录。"
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
             items = []
             for task_id, info in self.active_subtasks.items():
                 label = info.get("label") or "subtask"
                 task = info.get("task") or ""
-                items.append(f"- {label} (id: {task_id}): {task[:80]}")
-            content = "正在运行的子任务：\n" + "\n".join(items)
+                items.append(f"- {label} (id: {task_id}): {self._truncate(task, 80)}")
+            completed = []
+            for task_id in self.completed_subtasks_order[:10]:
+                info = self.completed_subtasks.get(task_id, {})
+                label = info.get("label") or "subtask"
+                status = info.get("status") or "ok"
+                completed.append(f"- {label} (id: {task_id}): {status}")
+            content = ""
+            if items:
+                content += "正在运行的子任务：\n" + "\n".join(items)
+            if completed:
+                if content:
+                    content += "\n"
+                content += "最近完成：\n" + "\n".join(completed)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"recent", "history"}:
+            if not self.completed_subtasks_order:
+                content = "没有最近的子任务完成记录。"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            lines = []
+            for task_id in self.completed_subtasks_order[:10]:
+                info = self.completed_subtasks.get(task_id, {})
+                label = info.get("label") or "subtask"
+                status = info.get("status") or "ok"
+                lines.append(f"- {label} (id: {task_id}): {status}")
+            content = "最近完成：\n" + "\n".join(lines)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/subtask list | /subtask <task_id>"
+            content = "用法：/subtask list | /subtask recent | /subtask <task_id>"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         task_id = arg
         info = self.active_subtasks.get(task_id)
-        if not info:
-            content = f"未找到子任务：{task_id}"
+        if info:
+            label = info.get("label") or "subtask"
+            task = info.get("task") or ""
+            content = f"子任务 {label} (id: {task_id})：\n{task}"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        label = info.get("label") or "subtask"
-        task = info.get("task") or ""
-        content = f"子任务 {label} (id: {task_id})：\n{task}"
+        info = self.completed_subtasks.get(task_id)
+        if info:
+            label = info.get("label") or "subtask"
+            status = info.get("status") or "ok"
+            result = info.get("result") or ""
+            content = f"子任务 {label} (id: {task_id}) 已完成，状态：{status}\n结果摘要：{self._truncate(result, 400)}"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        content = f"未找到子任务：{task_id}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     def _handle_model_command(
@@ -720,8 +798,10 @@ class AgentLoop:
         self._current_session_subtask_model = self._get_session_subtask_model(session)
 
         task_id = (msg.metadata or {}).get("task_id")
-        if task_id and task_id in self.active_subtasks:
-            self.active_subtasks.pop(task_id, None)
+        if task_id:
+            info = self.active_subtasks.pop(task_id, None)
+            status = (msg.metadata or {}).get("status") or "ok"
+            self._record_completed_subtask(task_id, info, status, msg.content or "")
         
         # Update tool contexts
         message_tool = self.tools.get("message")

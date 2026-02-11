@@ -50,6 +50,7 @@ class SubagentManager:
         workspace: Path,
         bus: MessageBus,
         model: str | None = None,
+        timeout_seconds: int | None = None,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
@@ -61,6 +62,7 @@ class SubagentManager:
         self.workspace = workspace
         self.bus = bus
         self.model = model or provider.get_default_model()
+        self.timeout_seconds = timeout_seconds or 300
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
@@ -97,7 +99,7 @@ class SubagentManager:
         
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, model=model)
+            self._run_subagent_with_timeout(task_id, task, display_label, origin, model=model)
         )
         self._running_tasks[task_id] = bg_task
         
@@ -410,6 +412,41 @@ class SubagentManager:
                 evidence="无",
                 risk="子任务异常失败。",
                 next_step="请检查异常信息并确认下一步。",
+                task_id=task_id,
+            )
+            await self._announce_result(
+                task_id,
+                label,
+                task,
+                render_subtask_result(structured),
+                origin,
+                "error",
+                {},
+            )
+
+    async def _run_subagent_with_timeout(
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, str],
+        model: str | None = None,
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                self._run_subagent(task_id, task, label, origin, model=model),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            error_msg = f"Error: Subtask timed out after {self.timeout_seconds}s"
+            logger.error(f"Subagent [{task_id}] timed out")
+            structured = format_subtask_output(
+                raw=error_msg,
+                status_hint="失败",
+                error_cause_hint="超时",
+                evidence="无",
+                risk="子任务执行超时。",
+                next_step="请缩小任务范围或增加超时时间后重试。",
                 task_id=task_id,
             )
             await self._announce_result(
