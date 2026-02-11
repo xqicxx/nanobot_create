@@ -755,6 +755,19 @@ class AgentLoop:
             return await self._process_system_message(msg)
 
         # Handle confirmation replies before LLM
+        stripped = (msg.content or "").strip().lower()
+        if stripped in {"确认", "confirm", "ok", "yes", "是"}:
+            pending = self.confirmations.list_pending_ids()
+            if len(pending) == 1:
+                return await self._handle_confirmation(pending[0], msg)
+            if len(pending) > 1:
+                content = (
+                    "有多个待确认命令，请回复：确认 CONFIRM-XXXX\n"
+                    "可用ID: " + ", ".join(pending)
+                )
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            content = "当前没有待确认命令。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
         confirm_id = self._extract_confirmation_id(msg.content)
         if confirm_id:
             return await self._handle_confirmation(confirm_id, msg)

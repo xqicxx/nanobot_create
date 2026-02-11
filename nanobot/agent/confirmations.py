@@ -49,6 +49,10 @@ class ConfirmationStore:
         record.used = True
         return record
 
+    def list_pending_ids(self) -> list[str]:
+        self._purge_expired()
+        return [cid for cid, rec in self._records.items() if not rec.used]
+
     def peek(self, confirm_id: str) -> ConfirmationRecord | None:
         self._purge_expired()
         record = self._records.get(confirm_id)
@@ -71,4 +75,3 @@ class ConfirmationStore:
         # fallback: longer token
         token = secrets.token_hex(3).upper()
         return f"CONFIRM-{token}"
-
