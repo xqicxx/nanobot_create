@@ -1155,8 +1155,8 @@ class AgentLoop:
         except Exception:
             content_len = -1
         logger.info(
-            "Message processed in %.0fms (channel=%s, sender=%s, len=%s, response=%s)",
-            elapsed_ms,
+            "Message processed in {}ms (channel={}, sender={}, len={}, response={})",
+            int(round(elapsed_ms)),
             msg.channel,
             msg.sender_id,
             content_len,
