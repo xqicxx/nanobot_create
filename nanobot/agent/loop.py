@@ -1328,6 +1328,44 @@ class AgentLoop:
             return None
         parts = raw.split(None, 1)
         arg = parts[1].strip().lower() if len(parts) > 1 else "list"
+        if arg in {"categories", "cats", "cat"}:
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu category list",
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
+        if arg in {"all", "full"}:
+            categories = self.memory_adapter.list_category_config()
+            lines = [
+                "全部命令（原始 + /menu 路由）：",
+                "/model list | /model <模型名> | /model reset",
+                "/model sub <模型名> | /model sub reset",
+                "/model clean",
+                "/memu status [fast|full]",
+                "/memu category list | /memu category add <名称> [| 描述]",
+                "/memu category update <名称> | <新描述> | /memu category delete <名称>",
+                "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
+                "/version",
+                "/menu list",
+                "/menu model ...",
+                "/menu status [fast|full]",
+                "/menu category ...",
+                "/menu categories",
+                "/menu subtask ...",
+                "/menu version",
+            ]
+            if categories:
+                lines.append("")
+                lines.append("当前分类：")
+                for idx, cat in enumerate(categories, start=1):
+                    name = cat.get("name", "")
+                    desc = cat.get("description", "")
+                    lines.append(f"{idx}. {name} - {desc}" if desc else f"{idx}. {name}")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
         if arg.startswith("model "):
             forwarded = InboundMessage(
                 channel=msg.channel,
@@ -1395,12 +1433,14 @@ class AgentLoop:
         lines = [
             "可用 /menu 子命令：",
             "/menu list",
+            "/menu all",
             "/menu model list | /menu model <模型名> | /menu model reset",
             "/menu model sub <模型名> | /menu model sub reset",
             "/menu model clean",
             "/menu status [fast|full]",
             "/menu category list | /menu category add <名称> [| 描述]",
             "/menu category update <名称> | <新描述> | /menu category delete <名称>",
+            "/menu categories (显示所有分类与描述)",
             "/menu subtask run [-m <模型>] <任务> | /menu subtask list | /menu subtask recent | /menu subtask <id> | /menu subtask clear",
             "/menu version",
         ]
