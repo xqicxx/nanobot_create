@@ -1330,8 +1330,10 @@ class AgentLoop:
         
         # Build initial messages (use get_history for LLM-formatted messages)
         memory_context = ""
+        memu_retrieve_ms: int | None = None
         if msg.channel != "system":
             try:
+                memu_start = time.perf_counter()
                 memory_context = (
                     await self.memory_adapter.retrieve_context(
                         channel=msg.channel,
@@ -1341,6 +1343,15 @@ class AgentLoop:
                         current_message=msg.content,
                     )
                 ).text
+                memu_retrieve_ms = int(round((time.perf_counter() - memu_start) * 1000))
+                logger.info(
+                    "MemU retrieve in {}ms (channel={}, sender={}, history_len={}, msg_len={})",
+                    memu_retrieve_ms,
+                    msg.channel,
+                    msg.sender_id,
+                    len(session.get_history()),
+                    len(msg.content or ""),
+                )
             except Exception as exc:
                 logger.warning(f"MemU context fetch failed: {exc}")
 
@@ -1366,10 +1377,20 @@ class AgentLoop:
                 iteration += 1
                 
                 # Call LLM
+                llm_start = time.perf_counter()
                 response = await self._get_provider_for_model(session_model).chat(
                     messages=messages,
                     tools=self.tools.get_definitions(),
-                    model=session_model
+                    model=session_model,
+                )
+                llm_elapsed_ms = int(round((time.perf_counter() - llm_start) * 1000))
+                logger.info(
+                    "LLM response in {}ms (channel={}, sender={}, model={}, iter={})",
+                    llm_elapsed_ms,
+                    msg.channel,
+                    msg.sender_id,
+                    session_model,
+                    iteration,
                 )
                 
                 # Handle tool calls
@@ -1614,6 +1635,7 @@ class AgentLoop:
         memory_context = ""
         if msg.channel != "system":
             try:
+                memu_start = time.perf_counter()
                 memory_context = (
                     await self.memory_adapter.retrieve_context(
                         channel=origin_channel,
@@ -1623,6 +1645,15 @@ class AgentLoop:
                         current_message=msg.content,
                     )
                 ).text
+                memu_elapsed_ms = int(round((time.perf_counter() - memu_start) * 1000))
+                logger.info(
+                    "MemU retrieve in {}ms (channel={}, sender={}, history_len={}, msg_len={})",
+                    memu_elapsed_ms,
+                    origin_channel,
+                    msg.sender_id,
+                    len(session.get_history()),
+                    len(msg.content or ""),
+                )
             except Exception as exc:
                 logger.warning(f"MemU context fetch failed: {exc}")
 
@@ -1641,10 +1672,20 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
+            llm_start = time.perf_counter()
             response = await self._get_provider_for_model(session_model).chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=session_model
+                model=session_model,
+            )
+            llm_elapsed_ms = int(round((time.perf_counter() - llm_start) * 1000))
+            logger.info(
+                "LLM response in {}ms (channel={}, sender={}, model={}, iter={})",
+                llm_elapsed_ms,
+                origin_channel,
+                msg.sender_id,
+                session_model,
+                iteration,
             )
             
             if response.has_tool_calls:

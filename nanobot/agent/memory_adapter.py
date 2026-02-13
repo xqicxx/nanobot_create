@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -281,10 +282,20 @@ class MemoryAdapter:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         try:
+            start = time.perf_counter()
             await self._memu.memorize(
                 resource_url=str(path),
                 modality="conversation",
                 user={"user_id": user_id},
+            )
+            elapsed_ms = int(round((time.perf_counter() - start) * 1000))
+            logger.info(
+                "MemU memorize in {}ms (channel={}, sender={}, msg_len={}, resp_len={})",
+                elapsed_ms,
+                channel,
+                sender_id,
+                len(user_message or ""),
+                len(assistant_message or ""),
             )
         except Exception as exc:
             logger.warning(f"MemU memorize failed: {exc}")
