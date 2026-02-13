@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import re
 from pathlib import Path
 from typing import Any
@@ -1146,6 +1147,24 @@ class AgentLoop:
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
+        start = time.perf_counter()
+        response = await self._process_message_impl(msg)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        try:
+            content_len = len(msg.content or "")
+        except Exception:
+            content_len = -1
+        logger.info(
+            "Message processed in %.0fms (channel=%s, sender=%s, len=%s, response=%s)",
+            elapsed_ms,
+            msg.channel,
+            msg.sender_id,
+            content_len,
+            "yes" if response else "no",
+        )
+        return response
+
+    async def _process_message_impl(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a single inbound message.
         
