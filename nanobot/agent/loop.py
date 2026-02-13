@@ -439,6 +439,8 @@ class AgentLoop:
             lines.append(_fmt_check("embedding"))
             lines.append(_fmt_check("write"))
             lines.append(_fmt_check("retrieve"))
+            if "delete" in checks:
+                lines.append(_fmt_check("delete"))
         else:
             lines.append("Checks: skipped (use /memu status to run)")
 

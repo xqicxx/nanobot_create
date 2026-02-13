@@ -352,65 +352,74 @@ class MemoryAdapter:
             return status
 
         test_user_id = self.build_user_id("memu-status", "healthcheck", "system")
-        test_path = None
+        vec: list[float] | None = None
         try:
             # Embedding check
             if status["embedding"].get("api_key_set"):
                 try:
                     embed_client = memu._get_llm_client("embedding")
                     vecs = await embed_client.embed(["memu health check"])
-                    status["checks"]["embedding"] = {"ok": bool(vecs)}
+                    vec = vecs[0] if vecs else None
+                    status["checks"]["embedding"] = {"ok": bool(vec)}
                 except Exception as exc:
                     status["checks"]["embedding"] = {"ok": False, "error": str(exc)}
             else:
                 status["checks"]["embedding"] = {"ok": False, "skipped": "missing_api_key"}
 
-            # Write + vector pipeline check (memorize + retrieve)
-            if status["llm"].get("api_key_set") and status["embedding"].get("api_key_set"):
-                payload = {
-                    "messages": [
-                        {"role": "user", "content": "memu health check"},
-                        {"role": "assistant", "content": "ok"},
-                    ],
-                    "metadata": {"healthcheck": True},
-                    "user_id": test_user_id,
-                }
-                timestamp = datetime.now().isoformat().replace(":", "-")
-                filename = safe_filename(f"healthcheck_{timestamp}.json")
-                test_path = self.resources_dir / filename
-                test_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Fast write/read/delete check (direct DB ops)
+            store = None
+            try:
+                store = memu._get_database()
+            except Exception:
+                store = None
 
+            if vec and store:
                 try:
-                    await memu.memorize(
-                        resource_url=str(test_path),
-                        modality="conversation",
-                        user={"user_id": test_user_id},
+                    resource = store.resource_repo.create_resource(
+                        url=f"memu://healthcheck/{test_user_id}",
+                        modality="text",
+                        local_path="",
+                        caption="memu health check",
+                        embedding=vec,
+                        user_data={"user_id": test_user_id},
+                    )
+                    store.memory_item_repo.create_item(
+                        resource_id=resource.id,
+                        memory_type="knowledge",
+                        summary="memu health check",
+                        embedding=vec,
+                        user_data={"user_id": test_user_id},
                     )
                     status["checks"]["write"] = {"ok": True}
                 except Exception as exc:
                     status["checks"]["write"] = {"ok": False, "error": str(exc)}
 
                 try:
-                    result = await memu.retrieve(
-                        queries=[{"role": "user", "content": {"text": "memu health check"}}],
+                    hits = store.memory_item_repo.vector_search_items(
+                        query_vec=vec,
+                        top_k=1,
                         where={"user_id": test_user_id},
                     )
-                    status["checks"]["retrieve"] = {"ok": True, "items": len(result.get("items", []))}
+                    status["checks"]["retrieve"] = {"ok": True, "items": len(hits)}
                 except Exception as exc:
                     status["checks"]["retrieve"] = {"ok": False, "error": str(exc)}
+
+                try:
+                    store.memory_item_repo.clear_items(where={"user_id": test_user_id})
+                    store.resource_repo.clear_resources(where={"user_id": test_user_id})
+                    status["checks"]["delete"] = {"ok": True}
+                except Exception as exc:
+                    status["checks"]["delete"] = {"ok": False, "error": str(exc)}
             else:
-                status["checks"]["write"] = {"ok": False, "skipped": "missing_api_key"}
-                status["checks"]["retrieve"] = {"ok": False, "skipped": "missing_api_key"}
+                reason = "missing_embedding_or_db"
+                status["checks"]["write"] = {"ok": False, "skipped": reason}
+                status["checks"]["retrieve"] = {"ok": False, "skipped": reason}
+                status["checks"]["delete"] = {"ok": False, "skipped": reason}
         finally:
             try:
                 await memu.clear_memory(where={"user_id": test_user_id})
             except Exception:
                 pass
-            if test_path and test_path.exists():
-                try:
-                    test_path.unlink()
-                except Exception:
-                    pass
 
         return status
 
