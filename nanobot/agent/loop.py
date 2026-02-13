@@ -428,10 +428,14 @@ class AgentLoop:
                     extra = ""
                     if "items" in chk:
                         extra = f" (items={chk.get('items')})"
+                    if chk.get("mode") == "full":
+                        extra = f"{extra} [full]"
                     return f"{name}: ok{extra}"
                 if chk.get("ok") is False:
                     if chk.get("skipped"):
                         return f"{name}: skipped ({chk.get('skipped')})"
+                    if chk.get("mode") == "full":
+                        return f"{name}: error ({chk.get('error')}) [full]"
                     return f"{name}: error ({chk.get('error')})"
                 return f"{name}: unknown"
 
@@ -456,18 +460,23 @@ class AgentLoop:
         arg_lower = arg.lower()
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/memu status [fast]"
+            content = "用法：/memu status [fast|full]"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         run_checks = True
         if "fast" in arg_lower or "quick" in arg_lower:
             run_checks = False
+        full_checks = False
+        if "full" in arg_lower:
+            run_checks = True
+            full_checks = True
 
         status = await self.memory_adapter.memu_status(
             channel=msg.channel,
             chat_id=msg.chat_id,
             sender_id=msg.sender_id,
             run_checks=run_checks,
+            full_checks=full_checks,
         )
         content = self._format_memu_status(status, run_checks)
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)

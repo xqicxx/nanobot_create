@@ -296,6 +296,7 @@ class MemoryAdapter:
         chat_id: str | None = None,
         sender_id: str | None = None,
         run_checks: bool = True,
+        full_checks: bool = False,
     ) -> dict[str, Any]:
         status: dict[str, Any] = {
             "enabled": bool(self.enable_memory and self._memu is not None),
@@ -349,6 +350,71 @@ class MemoryAdapter:
             status["health"] = {"ok": False, "error": str(exc)}
 
         if not run_checks:
+            return status
+
+        if full_checks:
+            test_user_id = self.build_user_id("memu-status", "fullcheck", "system")
+            test_path = None
+            try:
+                if status["embedding"].get("api_key_set"):
+                    try:
+                        embed_client = memu._get_llm_client("embedding")
+                        vecs = await embed_client.embed(["memu health check"])
+                        status["checks"]["embedding"] = {"ok": bool(vecs)}
+                    except Exception as exc:
+                        status["checks"]["embedding"] = {"ok": False, "error": str(exc)}
+                else:
+                    status["checks"]["embedding"] = {"ok": False, "skipped": "missing_api_key"}
+
+                if status["llm"].get("api_key_set") and status["embedding"].get("api_key_set"):
+                    payload = {
+                        "messages": [
+                            {"role": "user", "content": "memu full health check"},
+                            {"role": "assistant", "content": "ok"},
+                        ],
+                        "metadata": {"healthcheck": True, "mode": "full"},
+                        "user_id": test_user_id,
+                    }
+                    timestamp = datetime.now().isoformat().replace(":", "-")
+                    filename = safe_filename(f"healthcheck_full_{timestamp}.json")
+                    test_path = self.resources_dir / filename
+                    test_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                    try:
+                        await memu.memorize(
+                            resource_url=str(test_path),
+                            modality="conversation",
+                            user={"user_id": test_user_id},
+                        )
+                        status["checks"]["write"] = {"ok": True, "mode": "full"}
+                    except Exception as exc:
+                        status["checks"]["write"] = {"ok": False, "error": str(exc), "mode": "full"}
+
+                    try:
+                        result = await memu.retrieve(
+                            queries=[{"role": "user", "content": {"text": "memu full health check"}}],
+                            where={"user_id": test_user_id},
+                        )
+                        status["checks"]["retrieve"] = {
+                            "ok": True,
+                            "items": len(result.get("items", [])),
+                            "mode": "full",
+                        }
+                    except Exception as exc:
+                        status["checks"]["retrieve"] = {"ok": False, "error": str(exc), "mode": "full"}
+                else:
+                    status["checks"]["write"] = {"ok": False, "skipped": "missing_api_key", "mode": "full"}
+                    status["checks"]["retrieve"] = {"ok": False, "skipped": "missing_api_key", "mode": "full"}
+            finally:
+                try:
+                    await memu.clear_memory(where={"user_id": test_user_id})
+                except Exception:
+                    pass
+                if test_path and test_path.exists():
+                    try:
+                        test_path.unlink()
+                    except Exception:
+                        pass
             return status
 
         test_user_id = self.build_user_id("memu-status", "healthcheck", "system")
