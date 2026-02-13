@@ -258,6 +258,7 @@ class AgentLoop:
             "task_id": task_id,
             "label": (info or {}).get("label") or "subtask",
             "task": (info or {}).get("task") or "",
+            "model": (info or {}).get("model") or "",
             "status": status,
             "result": result,
         }
@@ -476,27 +477,31 @@ class AgentLoop:
 
         if not arg or arg_lower in {"list", "ls"}:
             if not self.active_subtasks and not self.completed_subtasks_order:
-                content = "当前没有在跑的子任务，也没有最近的完成记录。"
+                content = (
+                    "当前没有在跑的子任务，也没有最近的完成记录。\n"
+                    "用法：/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <task_id> | /subtask clear"
+                )
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-            items = []
-            for task_id, info in self.active_subtasks.items():
-                label = info.get("label") or "subtask"
-                task = info.get("task") or ""
-                items.append(f"- {label} (id: {task_id}): {self._truncate(task, 80)}")
-            completed = []
-            for task_id in self.completed_subtasks_order[:10]:
-                info = self.completed_subtasks.get(task_id, {})
-                label = info.get("label") or "subtask"
-                status = info.get("status") or "ok"
-                completed.append(f"- {label} (id: {task_id}): {status}")
-            content = ""
-            if items:
-                content += "正在运行的子任务：\n" + "\n".join(items)
-            if completed:
-                if content:
-                    content += "\n"
-                content += "最近完成：\n" + "\n".join(completed)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            lines: list[str] = []
+            lines.append(f"子任务概览：运行中 {len(self.active_subtasks)} 个，最近完成 {len(self.completed_subtasks_order[:10])} 个")
+            if self.active_subtasks:
+                lines.append("运行中：")
+                for idx, (task_id, info) in enumerate(self.active_subtasks.items(), start=1):
+                    label = info.get("label") or "subtask"
+                    task = info.get("task") or ""
+                    model = info.get("model") or "default"
+                    lines.append(f"{idx}. id={task_id} | label={label} | model={model}")
+                    lines.append(f"task: {self._truncate(task, 120)}")
+            if self.completed_subtasks_order:
+                lines.append("最近完成：")
+                for idx, task_id in enumerate(self.completed_subtasks_order[:10], start=1):
+                    info = self.completed_subtasks.get(task_id, {})
+                    label = info.get("label") or "subtask"
+                    status = info.get("status") or "ok"
+                    model = info.get("model") or "default"
+                    lines.append(f"{idx}. id={task_id} | label={label} | model={model} | status={status}")
+            lines.append("用法：/subtask run [-m <模型>] <任务> | /subtask <id> | /subtask recent | /subtask clear")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
 
         if arg_lower in {"recent", "history"}:
             if not self.completed_subtasks_order:
@@ -518,7 +523,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/subtask list | /subtask recent | /subtask <task_id> | /subtask run <任务> | /subtask clear"
+            content = "用法：/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <task_id> | /subtask clear"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         task_id = arg
@@ -741,23 +746,27 @@ class AgentLoop:
         label: str | None,
         origin_channel: str,
         origin_chat_id: str,
+        model_override: str | None = None,
     ) -> SpawnResult:
+        effective_model = model_override or self._current_session_subtask_model or self._current_session_model or self.model
         result = await self.subagents.spawn(
             task=task,
             label=label,
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,
-            model=self._current_session_subtask_model or self._current_session_model or self.model,
+            model=effective_model,
         )
         self.active_subtasks[result.task_id] = {
             "task": result.task,
             "label": result.label,
+            "model": effective_model,
             "origin": {"channel": origin_channel, "chat_id": origin_chat_id},
         }
         self._spawned_this_turn.append({
             "task_id": result.task_id,
             "label": result.label,
             "task": result.task,
+            "model": effective_model,
         })
         return result
 
@@ -807,7 +816,7 @@ class AgentLoop:
         if not spawned:
             return "未能启动子任务，请重试或补充说明。"
         tasks = "\n".join(
-            f"- {item['label']} (id: {item['task_id']}): {_summarize(item['task'])}"
+            f"- {item['label']} (id: {item['task_id']}, model: {item.get('model') or 'default'}): {_summarize(item['task'])}"
             for item in spawned
         )
         return (
@@ -815,6 +824,30 @@ class AgentLoop:
             f"{tasks}\n"
             "用 /subtask list 查看进度，用 /subtask <id> 查看详情。"
         )
+
+    def _parse_subtask_run_args(self, arg: str) -> tuple[str | None, str, str | None]:
+        """Parse /subtask run args. Returns (model_override, task, error)."""
+        arg = (arg or "").strip()
+        if not arg:
+            return None, "", "用法：/subtask run [-m <模型>] <任务内容>"
+        tokens = arg.split()
+        if tokens[0] in {"-m", "--model"}:
+            if len(tokens) < 2:
+                return None, "", "缺少模型名。用法：/subtask run -m <模型> <任务内容>"
+            model = tokens[1].strip()
+            task = " ".join(tokens[2:]).strip()
+            if not task:
+                return None, "", "缺少任务内容。用法：/subtask run -m <模型> <任务内容>"
+            return model, task, None
+        if tokens[0].startswith("--model="):
+            model = tokens[0].split("=", 1)[1].strip()
+            if not model:
+                return None, "", "缺少模型名。用法：/subtask run --model=<模型> <任务内容>"
+            task = " ".join(tokens[1:]).strip()
+            if not task:
+                return None, "", "缺少任务内容。用法：/subtask run --model=<模型> <任务内容>"
+            return model, task, None
+        return None, arg, None
 
     def _should_force_subtask(self, msg: InboundMessage) -> bool:
         user_text = msg.content or ""
@@ -984,14 +1017,28 @@ class AgentLoop:
         raw = (msg.content or "").strip()
         if raw.startswith("/subtask"):
             parts = raw.split(None, 2)
-            if len(parts) >= 3 and parts[1].lower() in {"run", "spawn"}:
-                task = parts[2].strip()
-                if task:
-                    await self._spawn_subtask(task, "subtask", msg.channel, msg.chat_id)
-                    content = self._build_spawn_ack(task, self._spawned_this_turn)
-                else:
-                    content = "用法：/subtask run <任务内容>"
+            if len(parts) >= 2 and parts[1].lower() in {"run", "spawn"}:
+                arg = parts[2].strip() if len(parts) >= 3 else ""
                 session = self.sessions.get_or_create(msg.session_key)
+                self._current_session_model = self._get_session_model(session)
+                self._current_session_subtask_model = self._get_session_subtask_model(session)
+                model_override, task, error = self._parse_subtask_run_args(arg)
+                if error:
+                    content = error
+                elif model_override and not self._model_is_configured(model_override):
+                    content = (
+                        f"子任务模型不可用或未配置对应提供商：{model_override}\n"
+                        "用法：/subtask run [-m <模型>] <任务>"
+                    )
+                else:
+                    await self._spawn_subtask(
+                        task,
+                        "subtask",
+                        msg.channel,
+                        msg.chat_id,
+                        model_override=model_override,
+                    )
+                    content = self._build_spawn_ack(task, self._spawned_this_turn)
                 session.add_message("user", msg.content)
                 session.add_message("assistant", content)
                 self.sessions.save(session)
@@ -999,9 +1046,11 @@ class AgentLoop:
 
         # Handle explicit subtask intent before LLM
         if self._wants_subtask_spawn(msg.content or ""):
+            session = self.sessions.get_or_create(msg.session_key)
+            self._current_session_model = self._get_session_model(session)
+            self._current_session_subtask_model = self._get_session_subtask_model(session)
             await self._spawn_subtask(msg.content, "subtask", msg.channel, msg.chat_id)
             content = self._build_spawn_ack(msg.content, self._spawned_this_turn)
-            session = self.sessions.get_or_create(msg.session_key)
             session.add_message("user", msg.content)
             session.add_message("assistant", content)
             self.sessions.save(session)
