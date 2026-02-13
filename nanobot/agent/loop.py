@@ -131,6 +131,9 @@ class AgentLoop:
         def _on_done(t: asyncio.Task) -> None:
             try:
                 t.result()
+            except asyncio.CancelledError:
+                # Expected on shutdown or Ctrl+C; no need to warn.
+                return
             except Exception as exc:
                 logger.warning(f"Background task {label} failed: {exc}")
 
