@@ -344,6 +344,15 @@ class AgentLoop:
         clean = " ".join(text.split())
         return clean if len(clean) <= max_len else clean[:max_len] + "..."
 
+    def _split_name_desc(self, payload: str) -> tuple[str, str]:
+        if not payload:
+            return "", ""
+        for sep in ("|", "：", ":"):
+            if sep in payload:
+                left, right = payload.split(sep, 1)
+                return left.strip(), right.strip()
+        return payload.strip(), ""
+
     def _record_completed_subtask(
         self,
         task_id: str,
@@ -557,7 +566,62 @@ class AgentLoop:
         arg_lower = arg.lower()
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/memu status [fast|full]"
+            content = (
+                "用法：/memu status [fast|full]\n"
+                "分类：/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower.startswith("category"):
+            sub_parts = arg.split(None, 2)
+            if len(sub_parts) < 2:
+                content = "用法：/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+            sub = sub_parts[1].lower()
+            payload = sub_parts[2].strip() if len(sub_parts) > 2 else ""
+
+            if sub in {"list", "ls"}:
+                categories = self.memory_adapter.list_category_config()
+                if not categories:
+                    content = "当前没有配置分类。"
+                else:
+                    lines = ["已配置分类："]
+                    for idx, cat in enumerate(categories, start=1):
+                        name = cat.get("name", "")
+                        desc = cat.get("description", "")
+                        lines.append(f"{idx}. {name} - {desc}" if desc else f"{idx}. {name}")
+                    content = "\n".join(lines)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+            if sub in {"add", "create"}:
+                name, desc = self._split_name_desc(payload)
+                result = self.memory_adapter.add_category_config(name, desc)
+                if result.get("ok"):
+                    content = f"已添加分类：{name}\n已写入：{result.get('path')}\n请重启服务生效。"
+                else:
+                    content = f"添加失败：{result.get('error')}"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+            if sub in {"update", "edit", "modify"}:
+                name, desc = self._split_name_desc(payload)
+                result = self.memory_adapter.update_category_config(name, desc)
+                if result.get("ok"):
+                    content = f"已更新分类：{name}\n已写入：{result.get('path')}\n请重启服务生效。"
+                else:
+                    content = f"更新失败：{result.get('error')}"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+            if sub in {"delete", "del", "remove"}:
+                name = payload.strip()
+                result = self.memory_adapter.delete_category_config(name)
+                if result.get("ok"):
+                    content = f"已删除分类：{name}\n已写入：{result.get('path')}\n请重启服务生效。"
+                else:
+                    content = f"删除失败：{result.get('error')}"
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+            content = "用法：/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         run_checks = True
@@ -1257,6 +1321,26 @@ class AgentLoop:
             content += f"\n路径：{package_path}"
         content += f"\nGit：{commit}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+    def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        raw = (msg.content or "").strip()
+        if not raw.startswith("/menu"):
+            return None
+        parts = raw.split(None, 1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else "list"
+        if arg not in {"list", "ls", "help", "?"}:
+            arg = "list"
+        lines = [
+            "可用指令：",
+            "/model list | /model <模型名> | /model reset",
+            "/model sub <模型名> | /model sub reset",
+            "/model clean",
+            "/memu status [fast|full]",
+            "/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>",
+            "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
+            "/version",
+        ]
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
     
     async def _process_message(
         self,
@@ -1315,6 +1399,15 @@ class AgentLoop:
 
         # Reset per-turn spawn tracking early
         self._spawned_this_turn = []
+
+        # Handle /version command before LLM
+        menu_response = self._handle_menu_command(msg)
+        if menu_response:
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", menu_response.content)
+            self.sessions.save(session)
+            return menu_response
 
         # Handle /version command before LLM
         version_response = self._handle_version_command(msg)

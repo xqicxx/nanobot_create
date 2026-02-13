@@ -300,6 +300,95 @@ class MemoryAdapter:
         except Exception as exc:
             logger.warning(f"MemU memorize failed: {exc}")
 
+    def list_category_config(self) -> list[dict[str, Any]]:
+        path, raw = self._read_category_config_raw()
+        if raw is None:
+            return self._fallback_category_config()
+        if isinstance(raw, dict):
+            raw = raw.get("memory_categories")
+        categories = raw if isinstance(raw, list) else []
+        return self._normalize_category_config(categories)
+
+    def add_category_config(self, name: str, description: str = "") -> dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "Category name is required"}
+        path, raw = self._read_category_config_raw()
+        if raw is None:
+            categories = self._fallback_category_config()
+            container: Any = {"memory_categories": categories}
+        elif isinstance(raw, dict):
+            container = raw
+            categories = raw.get("memory_categories") if isinstance(raw.get("memory_categories"), list) else []
+        else:
+            container = raw
+            categories = raw if isinstance(raw, list) else []
+
+        normalized = self._normalize_category_config(categories)
+        exists = {c.get("name", "").lower() for c in normalized}
+        if name.lower() in exists:
+            return {"ok": False, "error": f"Category already exists: {name}"}
+
+        normalized.append({"name": name, "description": (description or "").strip()})
+        self._write_category_config(path, container, normalized)
+        self._mark_memu_restart_required("memory category added")
+        return {"ok": True, "path": str(path)}
+
+    def update_category_config(self, name: str, description: str) -> dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "Category name is required"}
+        if description is None:
+            return {"ok": False, "error": "Category description is required"}
+        path, raw = self._read_category_config_raw()
+        if raw is None:
+            categories = self._fallback_category_config()
+            container: Any = {"memory_categories": categories}
+        elif isinstance(raw, dict):
+            container = raw
+            categories = raw.get("memory_categories") if isinstance(raw.get("memory_categories"), list) else []
+        else:
+            container = raw
+            categories = raw if isinstance(raw, list) else []
+
+        normalized = self._normalize_category_config(categories)
+        updated = False
+        for cat in normalized:
+            if cat.get("name", "").lower() == name.lower():
+                cat["description"] = (description or "").strip()
+                updated = True
+                break
+        if not updated:
+            return {"ok": False, "error": f"Category not found: {name}"}
+
+        self._write_category_config(path, container, normalized)
+        self._mark_memu_restart_required("memory category updated")
+        return {"ok": True, "path": str(path)}
+
+    def delete_category_config(self, name: str) -> dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "Category name is required"}
+        path, raw = self._read_category_config_raw()
+        if raw is None:
+            categories = self._fallback_category_config()
+            container: Any = {"memory_categories": categories}
+        elif isinstance(raw, dict):
+            container = raw
+            categories = raw.get("memory_categories") if isinstance(raw.get("memory_categories"), list) else []
+        else:
+            container = raw
+            categories = raw if isinstance(raw, list) else []
+
+        normalized = self._normalize_category_config(categories)
+        kept = [c for c in normalized if c.get("name", "").lower() != name.lower()]
+        if len(kept) == len(normalized):
+            return {"ok": False, "error": f"Category not found: {name}"}
+
+        self._write_category_config(path, container, kept)
+        self._mark_memu_restart_required("memory category deleted")
+        return {"ok": True, "path": str(path)}
+
     async def memu_status(
         self,
         *,
@@ -587,6 +676,83 @@ class MemoryAdapter:
 
     def is_restart_required(self) -> bool:
         return self._memu.is_restart_required()
+
+    def _read_category_config_raw(self) -> tuple[Path, Any | None]:
+        try:
+            from memu.app.settings import resolve_memory_category_config_path
+        except Exception:
+            path = (self.workspace / "config" / "memory_categories.json").resolve()
+            if not path.exists():
+                return path, None
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return path, None
+            return path, raw
+
+        path = resolve_memory_category_config_path()
+        if not path.exists():
+            return path, None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return path, None
+        return path, raw
+
+    def _fallback_category_config(self) -> list[dict[str, Any]]:
+        if self._memu is not None and hasattr(self._memu, "category_configs"):
+            try:
+                return [cfg.model_dump() for cfg in self._memu.category_configs]
+            except Exception:
+                pass
+        try:
+            from memu.app.settings import _default_memory_categories  # type: ignore
+        except Exception:
+            return []
+        try:
+            return [cfg.model_dump() for cfg in _default_memory_categories()]
+        except Exception:
+            return []
+
+    def _normalize_category_config(self, categories: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in categories:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cat: dict[str, Any] = {"name": name}
+            if "description" in item:
+                cat["description"] = str(item.get("description", "")).strip()
+            if "target_length" in item:
+                cat["target_length"] = item.get("target_length")
+            if "summary_prompt" in item:
+                cat["summary_prompt"] = item.get("summary_prompt")
+            normalized.append(cat)
+        return normalized
+
+    def _write_category_config(self, path: Path, container: Any, categories: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(container, dict):
+            data = dict(container)
+            data["memory_categories"] = categories
+        else:
+            data = categories
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _mark_memu_restart_required(self, reason: str) -> None:
+        if self._memu is None:
+            return
+        try:
+            self._memu.mark_restart_required(reason=reason)
+        except Exception:
+            return
 
     def _format_context(self, result: dict[str, Any]) -> str:
         items = result.get("items") or []
