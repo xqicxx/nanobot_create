@@ -335,8 +335,11 @@ class AgentLoop:
         config = load_config()
         default_model = config.agents.defaults.model
         default_subtask_model = config.agents.subtask.model or default_model
-        known_models = session.metadata.get("known_models") or []
-        known_subtask_models = session.metadata.get("known_subtask_models") or []
+        known_models = self._sanitize_known_models(session.metadata.get("known_models") or [])
+        known_subtask_models = self._sanitize_known_models(session.metadata.get("known_subtask_models") or [])
+        # Persist cleaned lists to avoid showing stale aliases
+        session.metadata["known_models"] = known_models
+        session.metadata["known_subtask_models"] = known_subtask_models
         merged: list[str] = []
         for candidate in [current_model, default_model, *known_models]:
             if candidate and candidate not in merged:
@@ -370,6 +373,7 @@ class AgentLoop:
             lines.append("已配置提供商：" + ", ".join(configured_providers))
         lines.append("用法：/model <模型名> | /model list | /model reset")
         lines.append("子任务：/model sub <模型名> | /model sub reset")
+        lines.append("清理历史：/model clean")
         return "\n".join(lines)
 
     def _format_memu_status(self, status: dict[str, Any], run_checks: bool) -> str:
@@ -577,7 +581,8 @@ class AgentLoop:
                 f"当前模型：{current_model}\n"
                 f"子任务模型：{self._get_session_subtask_model(session)}\n"
                 "用法：/model list | /model <模型名> | /model reset\n"
-                "子任务：/model sub <模型名> | /model sub reset"
+                "子任务：/model sub <模型名> | /model sub reset\n"
+                "清理历史：/model clean"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
@@ -616,13 +621,20 @@ class AgentLoop:
         if arg_lower in {"help", "?"}:
             content = (
                 "用法：/model list | /model <模型名> | /model reset\n"
-                "子任务：/model sub <模型名> | /model sub reset"
+                "子任务：/model sub <模型名> | /model sub reset\n"
+                "清理历史：/model clean"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"reset", "default", "restart", "reload"}:
             session.metadata.pop("model", None)
             content = f"已恢复默认模型：{self.model}"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower in {"clean", "clear", "purge"}:
+            session.metadata.pop("known_models", None)
+            session.metadata.pop("known_subtask_models", None)
+            content = "已清理模型历史列表。"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         # Set model override (per-session)
@@ -851,14 +863,34 @@ class AgentLoop:
             return target
         return model
 
+    def _sanitize_known_models(self, models: list[str]) -> list[str]:
+        from nanobot.providers.registry import PROVIDERS
+
+        provider_names = {spec.name for spec in PROVIDERS}
+        cleaned: list[str] = []
+        for m in models:
+            if not m:
+                continue
+            normalized = self._normalize_model_alias(m) or m
+            lowered = normalized.lower()
+            if lowered in {"restart", "reset", "fast", "flash"}:
+                continue
+            if lowered in provider_names:
+                continue
+            if not self._model_is_configured(normalized):
+                continue
+            if normalized not in cleaned:
+                cleaned.append(normalized)
+        return cleaned
+
     def _collect_model_candidates(self, session: "Session") -> list[str]:
         from nanobot.config.loader import load_config
 
         config = load_config()
         default_model = config.agents.defaults.model
         default_subtask_model = config.agents.subtask.model or default_model
-        known_models = session.metadata.get("known_models") or []
-        known_subtask_models = session.metadata.get("known_subtask_models") or []
+        known_models = self._sanitize_known_models(session.metadata.get("known_models") or [])
+        known_subtask_models = self._sanitize_known_models(session.metadata.get("known_subtask_models") or [])
         current_model = self._get_session_model(session)
         current_subtask = self._get_session_subtask_model(session)
 
