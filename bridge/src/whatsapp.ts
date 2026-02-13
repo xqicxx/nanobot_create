@@ -17,8 +17,14 @@ import pino from 'pino';
 
 const VERSION = '0.1.0';
 
-const WA_MARK_ONLINE = /^(1|true|yes)$/i.test(process.env.WA_MARK_ONLINE ?? '');
-const WA_AUTO_READ = /^(1|true|yes)$/i.test(process.env.WA_AUTO_READ ?? '');
+const WA_MARK_ONLINE =
+  process.env.WA_MARK_ONLINE === undefined
+    ? true
+    : /^(1|true|yes)$/i.test(process.env.WA_MARK_ONLINE);
+const WA_AUTO_READ =
+  process.env.WA_AUTO_READ === undefined
+    ? true
+    : /^(1|true|yes)$/i.test(process.env.WA_AUTO_READ);
 const WA_DEBUG = /^(1|true|yes)$/i.test(process.env.WA_DEBUG ?? '');
 
 export interface InboundMessage {
