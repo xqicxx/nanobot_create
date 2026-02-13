@@ -111,6 +111,7 @@ class AgentLoop:
         )
         
         self._running = False
+        self._provider_cache: dict[str, LLMProvider] = {}
         self._register_default_tools()
 
     @staticmethod
@@ -528,6 +529,14 @@ class AgentLoop:
         from nanobot.providers.registry import PROVIDERS, find_by_model, find_by_name
 
         config = load_config()
+        if model.startswith("bedrock/"):
+            return True
+
+        # If config can resolve a provider for this model, accept it.
+        provider_cfg = config.get_provider(model)
+        if provider_cfg and (getattr(provider_cfg, "api_key", None) or getattr(provider_cfg, "api_base", None)):
+            return True
+
         model_lower = model.lower()
         spec = find_by_model(model_lower)
 
@@ -555,6 +564,30 @@ class AgentLoop:
             if getattr(provider_cfg, "api_key", None) or getattr(provider_cfg, "api_base", None):
                 return True
         return False
+
+    def _get_provider_for_model(self, model: str) -> LLMProvider:
+        if not model:
+            return self.provider
+        cached = self._provider_cache.get(model)
+        if cached:
+            return cached
+
+        from nanobot.config.loader import load_config
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+
+        config = load_config()
+        p = config.get_provider(model)
+        if not p and not model.startswith("bedrock/"):
+            return self.provider
+        provider = LiteLLMProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            provider_name=config.get_provider_name(model),
+        )
+        self._provider_cache[model] = provider
+        return provider
 
     async def _send_presence(self, msg: InboundMessage, presence: str) -> None:
         if msg.channel != "whatsapp":
@@ -967,7 +1000,7 @@ class AgentLoop:
                 iteration += 1
                 
                 # Call LLM
-                response = await self.provider.chat(
+                response = await self._get_provider_for_model(session_model).chat(
                     messages=messages,
                     tools=self.tools.get_definitions(),
                     model=session_model
@@ -1242,7 +1275,7 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
-            response = await self.provider.chat(
+            response = await self._get_provider_for_model(session_model).chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=session_model
