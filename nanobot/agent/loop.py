@@ -605,7 +605,7 @@ class AgentLoop:
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-        if arg_lower in {"reset", "default"}:
+        if arg_lower in {"reset", "default", "restart", "reload"}:
             session.metadata.pop("model", None)
             content = f"已恢复默认模型：{self.model}"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
@@ -907,6 +907,11 @@ class AgentLoop:
             provider_candidates = [
                 m for m in candidates
                 if self._model_belongs_to_provider(m, provider_name) and self._model_is_configured(m)
+            ]
+            # If a candidate is just the provider name (e.g. "minimax"), drop it.
+            provider_candidates = [
+                m for m in provider_candidates
+                if m.lower() != provider_name
             ]
             # Built-in defaults for common providers
             defaults = {
