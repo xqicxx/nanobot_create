@@ -580,13 +580,10 @@ class AgentLoop:
                 session.metadata.pop("subtask_model", None)
                 content = f"已恢复子任务默认模型：{self.subtask_model or self.model}"
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-            model_name = sub_arg
-            if not self._model_is_configured(model_name):
-                content = (
-                    f"子任务模型不可用或未配置对应提供商：{model_name}\n"
-                    "用法：/model list 查看可用提供商"
-                )
-                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            resolved, error = self._resolve_model_input(sub_arg, session)
+            if error:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=error)
+            model_name = resolved or sub_arg
             session.metadata["subtask_model"] = model_name
             known_subtask = session.metadata.get("known_subtask_models") or []
             if model_name not in known_subtask:
@@ -614,13 +611,10 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         # Set model override (per-session)
-        model_name = arg
-        if not self._model_is_configured(model_name):
-            content = (
-                f"模型不可用或未配置对应提供商：{model_name}\n"
-                "用法：/model list 查看可用提供商"
-            )
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        resolved, error = self._resolve_model_input(arg, session)
+        if error:
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=error)
+        model_name = resolved or arg
 
         session.metadata["model"] = model_name
         known_models = session.metadata.get("known_models") or []
@@ -825,6 +819,106 @@ class AgentLoop:
             "用 /subtask list 查看进度，用 /subtask <id> 查看详情。"
         )
 
+    def _collect_model_candidates(self, session: "Session") -> list[str]:
+        from nanobot.config.loader import load_config
+
+        config = load_config()
+        default_model = config.agents.defaults.model
+        default_subtask_model = config.agents.subtask.model or default_model
+        known_models = session.metadata.get("known_models") or []
+        known_subtask_models = session.metadata.get("known_subtask_models") or []
+        current_model = self._get_session_model(session)
+        current_subtask = self._get_session_subtask_model(session)
+
+        merged: list[str] = []
+        for candidate in [
+            current_model,
+            default_model,
+            default_subtask_model,
+            current_subtask,
+            *known_models,
+            *known_subtask_models,
+        ]:
+            if candidate and candidate not in merged:
+                merged.append(candidate)
+        return merged
+
+    def _match_provider_alias(self, token: str) -> str | None:
+        """Map short provider aliases to registry names."""
+        t = token.lower()
+        alias_map = {
+            "step": "stepfun",
+            "stepfun": "stepfun",
+            "minimax": "minimax",
+            "openai": "openai",
+            "anthropic": "anthropic",
+            "deepseek": "deepseek",
+            "gemini": "gemini",
+            "moonshot": "moonshot",
+            "dashscope": "dashscope",
+            "zhipu": "zhipu",
+            "groq": "groq",
+            "openrouter": "openrouter",
+            "aihubmix": "aihubmix",
+            "vllm": "vllm",
+        }
+        return alias_map.get(t)
+
+    def _model_belongs_to_provider(self, model: str, provider_name: str) -> bool:
+        from nanobot.providers.registry import find_by_model, find_by_name
+
+        if not model:
+            return False
+        spec = find_by_model(model.lower())
+        if spec is None and "/" in model:
+            spec = find_by_name(model.split("/", 1)[0].lower())
+        return bool(spec and spec.name == provider_name)
+
+    def _resolve_model_input(self, model_input: str, session: "Session") -> tuple[str | None, str | None]:
+        """Resolve short model inputs. Returns (model, error_message)."""
+        raw = (model_input or "").strip()
+        if not raw:
+            return None, "缺少模型名。"
+
+        # Exact and already configured
+        if self._model_is_configured(raw):
+            return raw, None
+
+        # Known candidates (session + defaults)
+        candidates = self._collect_model_candidates(session)
+
+        # Provider alias like "step" or "minimax"
+        provider_name = self._match_provider_alias(raw)
+        if provider_name:
+            provider_candidates = [
+                m for m in candidates
+                if self._model_belongs_to_provider(m, provider_name) and self._model_is_configured(m)
+            ]
+            # Built-in defaults for common providers
+            defaults = {
+                "stepfun": ["step-3.5-flash"],
+                "minimax": ["minimax/MiniMax-M2.1"],
+            }
+            for m in defaults.get(provider_name, []):
+                if m not in provider_candidates and self._model_is_configured(m):
+                    provider_candidates.append(m)
+            if len(provider_candidates) == 1:
+                return provider_candidates[0], None
+            if len(provider_candidates) > 1:
+                options = " / ".join(provider_candidates[:5])
+                return None, f"发现多个可选模型，请选择其一：{options}"
+            return None, f"未找到 {raw} 对应的模型或未配置该提供商。"
+
+        # Fuzzy match against candidates
+        matches = [m for m in candidates if raw.lower() in m.lower() and self._model_is_configured(m)]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            options = " / ".join(matches[:5])
+            return None, f"发现多个可选模型，请选择其一：{options}"
+
+        return None, f"模型不可用或未配置对应提供商：{raw}"
+
     def _parse_subtask_run_args(self, arg: str) -> tuple[str | None, str, str | None]:
         """Parse /subtask run args. Returns (model_override, task, error)."""
         arg = (arg or "").strip()
@@ -1025,20 +1119,30 @@ class AgentLoop:
                 model_override, task, error = self._parse_subtask_run_args(arg)
                 if error:
                     content = error
-                elif model_override and not self._model_is_configured(model_override):
-                    content = (
-                        f"子任务模型不可用或未配置对应提供商：{model_override}\n"
-                        "用法：/subtask run [-m <模型>] <任务>"
-                    )
                 else:
-                    await self._spawn_subtask(
-                        task,
-                        "subtask",
-                        msg.channel,
-                        msg.chat_id,
-                        model_override=model_override,
-                    )
-                    content = self._build_spawn_ack(task, self._spawned_this_turn)
+                    resolved_override = None
+                    if model_override:
+                        resolved_override, error = self._resolve_model_input(model_override, session)
+                        if error:
+                            content = error
+                        else:
+                            resolved_override = resolved_override or model_override
+                    if error:
+                        pass
+                    else:
+                        await self._spawn_subtask(
+                            task,
+                            "subtask",
+                            msg.channel,
+                            msg.chat_id,
+                            model_override=resolved_override,
+                        )
+                        content = self._build_spawn_ack(task, self._spawned_this_turn)
+                if error:
+                    session.add_message("user", msg.content)
+                    session.add_message("assistant", content)
+                    self.sessions.save(session)
+                    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
                 session.add_message("user", msg.content)
                 session.add_message("assistant", content)
                 self.sessions.save(session)
