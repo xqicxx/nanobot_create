@@ -114,6 +114,18 @@ class AgentLoop:
             if isinstance(content, str) and not content.startswith("[System:"):
                 return content
         return None
+
+    @staticmethod
+    def _fire_and_forget(coro: Any, label: str) -> None:
+        task = asyncio.create_task(coro)
+
+        def _on_done(t: asyncio.Task) -> None:
+            try:
+                t.result()
+            except Exception as exc:
+                logger.warning(f"Background task {label} failed: {exc}")
+
+        task.add_done_callback(_on_done)
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -1052,30 +1064,35 @@ class AgentLoop:
         self._current_session_model = None
         self._current_session_subtask_model = None
 
-        # Persist memory via MemU (skip system messages and low-signal content)
-        if msg.channel != "system":
-            previous_user = self._get_previous_user_message(session.messages[:-2])
-            if not self.memory_adapter.should_skip_write(msg.content, previous_user):
-                await self.memory_adapter.memorize_turn(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    sender_id=msg.sender_id,
-                    user_message=msg.content,
-                    assistant_message=final_content,
-                    metadata={
-                        "session_key": msg.session_key,
-                        "channel": msg.channel,
-                        "chat_id": msg.chat_id,
-                        "sender_id": msg.sender_id,
-                    },
-                )
-        
-        return OutboundMessage(
+        outbound = OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
+
+        # Persist memory via MemU (skip system messages and low-signal content)
+        if msg.channel != "system":
+            previous_user = self._get_previous_user_message(session.messages[:-2])
+            if not self.memory_adapter.should_skip_write(msg.content, previous_user):
+                self._fire_and_forget(
+                    self.memory_adapter.memorize_turn(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        sender_id=msg.sender_id,
+                        user_message=msg.content,
+                        assistant_message=final_content,
+                        metadata={
+                            "session_key": msg.session_key,
+                            "channel": msg.channel,
+                            "chat_id": msg.chat_id,
+                            "sender_id": msg.sender_id,
+                        },
+                    ),
+                    "memorize_turn",
+                )
+
+        return outbound
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
