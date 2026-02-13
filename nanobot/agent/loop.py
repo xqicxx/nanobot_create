@@ -1322,12 +1322,32 @@ class AgentLoop:
         content += f"\nGit：{commit}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
         if not raw.startswith("/menu"):
             return None
         parts = raw.split(None, 1)
         arg = parts[1].strip().lower() if len(parts) > 1 else "list"
+        if arg.startswith("memu "):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu " + arg[5:],
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
+        if arg.startswith("category"):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu " + arg,
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
         if arg not in {"list", "ls", "help", "?"}:
             arg = "list"
         lines = [
@@ -1339,6 +1359,7 @@ class AgentLoop:
             "/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>",
             "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
             "/version",
+            "/menu list",
         ]
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
     
@@ -1405,7 +1426,7 @@ class AgentLoop:
         self._spawned_this_turn = []
 
         # Handle /version command before LLM
-        menu_response = self._handle_menu_command(msg)
+        menu_response = await self._handle_menu_command(msg)
         if menu_response:
             session = self.sessions.get_or_create(msg.session_key)
             session.add_message("user", msg.content)
