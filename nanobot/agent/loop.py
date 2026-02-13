@@ -1328,12 +1328,44 @@ class AgentLoop:
             return None
         parts = raw.split(None, 1)
         arg = parts[1].strip().lower() if len(parts) > 1 else "list"
+        if arg.startswith("model "):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/model " + arg[6:],
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            session = self.sessions.get_or_create(msg.session_key)
+            current_model = self._get_session_model(session)
+            return self._handle_model_command(forwarded, session, current_model)
+        if arg.startswith("subtask "):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/subtask " + arg[8:],
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return self._handle_subtask_command(forwarded)
         if arg.startswith("memu "):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
                 content="/memu " + arg[5:],
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
+        if arg.startswith("status"):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu " + arg,
                 media=msg.media,
                 metadata=msg.metadata,
             )
@@ -1348,18 +1380,29 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
+        if arg in {"version", "ver"}:
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/version",
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return self._handle_version_command(forwarded)
         if arg not in {"list", "ls", "help", "?"}:
             arg = "list"
         lines = [
-            "可用指令：",
-            "/model list | /model <模型名> | /model reset",
-            "/model sub <模型名> | /model sub reset",
-            "/model clean",
-            "/memu status [fast|full]",
-            "/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>",
-            "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
-            "/version",
+            "可用 /menu 子命令：",
             "/menu list",
+            "/menu model list | /menu model <模型名> | /menu model reset",
+            "/menu model sub <模型名> | /menu model sub reset",
+            "/menu model clean",
+            "/menu status [fast|full]",
+            "/menu category list | /menu category add <名称> [| 描述]",
+            "/menu category update <名称> | <新描述> | /menu category delete <名称>",
+            "/menu subtask run [-m <模型>] <任务> | /menu subtask list | /menu subtask recent | /menu subtask <id> | /menu subtask clear",
+            "/menu version",
         ]
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
     
