@@ -57,6 +57,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         memory_adapter: MemoryAdapter | None = None,
         memu_config: Any | None = None,
+        stream_config: Any | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -75,6 +76,9 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.stream_enabled = bool(getattr(stream_config, "enabled", False)) if stream_config is not None else False
+        stream_channels = getattr(stream_config, "channels", []) if stream_config is not None else []
+        self.stream_channels = {c for c in stream_channels if isinstance(c, str)}
         
         self.context = ContextBuilder(workspace)
         memu_enabled = True
@@ -717,6 +721,17 @@ class AgentLoop:
         self._provider_cache[model] = provider
         return provider
 
+    def _should_stream(self, channel: str | None, stream_callback: Any | None) -> bool:
+        if not stream_callback:
+            return False
+        if not self.stream_enabled:
+            return False
+        if not channel:
+            return False
+        if not self.stream_channels:
+            return False
+        return channel in self.stream_channels
+
     async def _send_presence(self, msg: InboundMessage, presence: str) -> None:
         if msg.channel != "whatsapp":
             return
@@ -1146,7 +1161,11 @@ class AgentLoop:
         content += f"\nGit：{commit}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
     
-    async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _process_message(
+        self,
+        msg: InboundMessage,
+        stream_callback: Any | None = None,
+    ) -> OutboundMessage | None:
         start = time.perf_counter()
         response = await self._process_message_impl(msg)
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -1378,10 +1397,13 @@ class AgentLoop:
                 
                 # Call LLM
                 llm_start = time.perf_counter()
+                use_stream = self._should_stream(msg.channel, stream_callback)
                 response = await self._get_provider_for_model(session_model).chat(
                     messages=messages,
                     tools=self.tools.get_definitions(),
                     model=session_model,
+                    stream=use_stream,
+                    on_token=stream_callback if use_stream else None,
                 )
                 llm_elapsed_ms = int(round((time.perf_counter() - llm_start) * 1000))
                 logger.info(
@@ -1750,6 +1772,7 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        stream_callback: Any | None = None,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
@@ -1770,5 +1793,5 @@ class AgentLoop:
             content=content
         )
         
-        response = await self._process_message(msg)
+        response = await self._process_message(msg, stream_callback=stream_callback)
         return response.content if response else ""

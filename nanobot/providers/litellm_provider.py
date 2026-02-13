@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 import litellm
 from litellm import acompletion
@@ -106,6 +106,8 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        stream: bool = False,
+        on_token: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -149,6 +151,65 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
         
         try:
+            if stream:
+                kwargs["stream"] = True
+                response = await acompletion(**kwargs)
+                content_parts: list[str] = []
+                tool_call_map: dict[int, dict[str, Any]] = {}
+
+                async for chunk in response:
+                    choice = chunk.choices[0] if chunk.choices else None
+                    delta = getattr(choice, "delta", None) if choice else None
+                    if delta is None:
+                        continue
+
+                    delta_content = getattr(delta, "content", None)
+                    if delta_content:
+                        content_parts.append(delta_content)
+                        if on_token:
+                            on_token(delta_content)
+
+                    delta_tool_calls = getattr(delta, "tool_calls", None)
+                    if delta_tool_calls:
+                        for tc in delta_tool_calls:
+                            idx = getattr(tc, "index", 0) or 0
+                            entry = tool_call_map.setdefault(
+                                idx,
+                                {"id": None, "name": None, "arguments": ""},
+                            )
+                            if getattr(tc, "id", None):
+                                entry["id"] = tc.id
+                            fn = getattr(tc, "function", None)
+                            if fn is not None:
+                                if getattr(fn, "name", None):
+                                    entry["name"] = fn.name
+                                if getattr(fn, "arguments", None):
+                                    entry["arguments"] += fn.arguments
+
+                tool_calls: list[ToolCallRequest] = []
+                if tool_call_map:
+                    for idx in sorted(tool_call_map.keys()):
+                        entry = tool_call_map[idx]
+                        args = entry.get("arguments", "")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except json.JSONDecodeError:
+                                args = {"raw": args}
+                        tool_calls.append(
+                            ToolCallRequest(
+                                id=entry.get("id") or f"tool_{idx}",
+                                name=entry.get("name") or "tool",
+                                arguments=args,
+                            )
+                        )
+
+                return LLMResponse(
+                    content="".join(content_parts) if content_parts else None,
+                    tool_calls=tool_calls,
+                    finish_reason="stop",
+                )
+
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:

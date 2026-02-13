@@ -4,7 +4,9 @@ import asyncio
 import atexit
 import os
 import signal
+import shutil
 from pathlib import Path
+from typing import Callable
 import select
 import sys
 
@@ -153,6 +155,29 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     console.print()
 
 
+def _make_stream_printer() -> tuple[Callable[[str], None], Callable[[], None]]:
+    """Return (on_token, finish) callbacks for streaming output."""
+    started = False
+
+    def on_token(token: str) -> None:
+        nonlocal started
+        if not token:
+            return
+        if not started:
+            console.print()
+            console.print(f"{__logo__} nanobot (stream):", style="cyan")
+            started = True
+        sys.stdout.write(token)
+        sys.stdout.flush()
+
+    def finish() -> None:
+        if started:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    return on_token, finish
+
+
 def _is_exit_command(command: str) -> bool:
     """Return True when input should end interactive chat."""
     return command.lower() in EXIT_COMMANDS
@@ -209,6 +234,8 @@ def onboard():
     # Create workspace
     workspace = get_workspace_path()
     console.print(f"[green]✓[/green] Created workspace at {workspace}")
+
+    _cleanup_legacy_memory(workspace)
     
     # Create default bootstrap files
     _create_workspace_templates(workspace)
@@ -276,6 +303,25 @@ Information about the user goes here.
     skills_dir.mkdir(exist_ok=True)
 
 
+def _cleanup_legacy_memory(workspace: Path) -> None:
+    """Prompt and remove legacy memory directory/files from old versions."""
+    legacy_dir = workspace / "memory"
+    legacy_file = workspace / "MEMORY.md"
+    if not legacy_dir.exists() and not legacy_file.exists():
+        return
+
+    console.print("[yellow]Detected legacy memory files from older versions.[/yellow]")
+    if typer.confirm("Remove legacy memory directory/files?"):
+        try:
+            if legacy_dir.exists():
+                shutil.rmtree(legacy_dir)
+            if legacy_file.exists():
+                legacy_file.unlink()
+            console.print("[green]✓[/green] Removed legacy memory files")
+        except Exception as exc:
+            console.print(f"[red]Failed to remove legacy memory files: {exc}[/red]")
+
+
 def _make_provider(config):
     """Create LiteLLMProvider from config. Exits if no API key found."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -324,6 +370,7 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
     config = load_config()
+    stream_enabled = bool(config.agents.stream.enabled and "cli" in config.agents.stream.channels)
 
     # Prevent multiple gateway instances (causes duplicate replies and mismatched subtask state)
     lock_path = get_data_dir() / "gateway.lock"
@@ -368,6 +415,7 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         memu_config=config.memu,
+        stream_config=config.agents.stream,
     )
     
     # Set cron callback (needs agent)
@@ -473,11 +521,12 @@ def agent(
         subtask_model=config.agents.subtask.model,
         subtask_timeout=config.agents.subtask.timeout_seconds,
         memu_config=config.memu,
+        stream_config=config.agents.stream,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
-        if logs:
+        if logs or stream_enabled:
             from contextlib import nullcontext
             return nullcontext()
         return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
@@ -485,9 +534,17 @@ def agent(
     if message:
         # Single message mode
         async def run_once():
+            on_token, finish = _make_stream_printer() if stream_enabled else (None, lambda: None)
             with _thinking_ctx():
-                response = await agent_loop.process_direct(message, session_id)
-            _print_agent_response(response, render_markdown=markdown)
+                response = await agent_loop.process_direct(
+                    message,
+                    session_id,
+                    stream_callback=on_token,
+                )
+            if stream_enabled:
+                finish()
+            else:
+                _print_agent_response(response, render_markdown=markdown)
         
         asyncio.run(run_once())
     else:
@@ -520,9 +577,17 @@ def agent(
                         console.print("\nGoodbye!")
                         break
                     
+                    on_token, finish = _make_stream_printer() if stream_enabled else (None, lambda: None)
                     with _thinking_ctx():
-                        response = await agent_loop.process_direct(user_input, session_id)
-                    _print_agent_response(response, render_markdown=markdown)
+                        response = await agent_loop.process_direct(
+                            user_input,
+                            session_id,
+                            stream_callback=on_token,
+                        )
+                    if stream_enabled:
+                        finish()
+                    else:
+                        _print_agent_response(response, render_markdown=markdown)
                 except KeyboardInterrupt:
                     _save_history()
                     _restore_terminal()

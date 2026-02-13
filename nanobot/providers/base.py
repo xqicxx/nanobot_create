@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -48,6 +48,8 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        stream: bool = False,
+        on_token: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -58,6 +60,8 @@ class LLMProvider(ABC):
             model: Model identifier (provider-specific).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            stream: Whether to stream tokens as they are generated.
+            on_token: Optional callback for streaming token deltas.
         
         Returns:
             LLMResponse with content and/or tool calls.
