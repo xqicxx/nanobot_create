@@ -9,11 +9,14 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
+
+if TYPE_CHECKING:
+    from nanobot.config.schema import MemuConfig, MemuLLMConfig
 
 
 _GREETING_TOKENS = {
@@ -103,12 +106,16 @@ class MemoryAdapter:
         resources_dir: Path | None = None,
         retrieve_top_k: int = 5,
         enable_memory: bool = True,
+        memu_config: "MemuConfig | None" = None,
     ):
         self.workspace = workspace
         self.retrieve_top_k = retrieve_top_k
+        if memu_config is not None and not memu_config.enabled:
+            enable_memory = False
         self.enable_memory = enable_memory
         self.resources_dir = ensure_dir(resources_dir or (workspace / ".memu" / "resources"))
-        self._memu = memu_service or self._init_memu_service()
+        self.memu_config = memu_config
+        self._memu = memu_service or (self._init_memu_service() if self.enable_memory else None)
 
     def _init_memu_service(self) -> Any:
         try:
@@ -131,29 +138,56 @@ class MemoryAdapter:
         blob_config = {
             "resources_dir": str(self.resources_dir),
         }
+        def _cfg_value(
+            cfg: "MemuLLMConfig | None",
+            attr: str,
+            env_key: str,
+            default: str,
+        ) -> str:
+            if cfg is not None:
+                val = getattr(cfg, attr, "") or ""
+                if val:
+                    return val
+            return os.getenv(env_key, default)
+
+        memu_cfg = self.memu_config
+        default_cfg = getattr(memu_cfg, "default", None) if memu_cfg else None
+        embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
+
         llm_profiles = {
             "default": {
-                "provider": os.getenv("DEEPSEEK_PROVIDER", "openai"),
-                "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-                "api_key": os.getenv("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
-                "chat_model": os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
-                "client_backend": os.getenv("DEEPSEEK_CLIENT_BACKEND", "sdk"),
+                "provider": _cfg_value(default_cfg, "provider", "DEEPSEEK_PROVIDER", "openai"),
+                "base_url": _cfg_value(default_cfg, "base_url", "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+                "api_key": _cfg_value(default_cfg, "api_key", "DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
+                "chat_model": _cfg_value(default_cfg, "chat_model", "DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                "client_backend": _cfg_value(default_cfg, "client_backend", "DEEPSEEK_CLIENT_BACKEND", "sdk"),
             },
             "embedding": {
-                "provider": os.getenv("SILICONFLOW_PROVIDER", "openai"),
-                "base_url": os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
-                "api_key": os.getenv("SILICONFLOW_API_KEY", "SILICONFLOW_API_KEY"),
-                "chat_model": os.getenv(
-                    "SILICONFLOW_CHAT_MODEL",
-                    os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                "provider": _cfg_value(embedding_cfg, "provider", "SILICONFLOW_PROVIDER", "openai"),
+                "base_url": _cfg_value(
+                    embedding_cfg,
+                    "base_url",
+                    "SILICONFLOW_BASE_URL",
+                    "https://api.siliconflow.cn/v1",
                 ),
-                "embed_model": os.getenv("SILICONFLOW_EMBED_MODEL", "BAAI/bge-m3"),
-                "client_backend": os.getenv("SILICONFLOW_CLIENT_BACKEND", "sdk"),
+                "api_key": _cfg_value(embedding_cfg, "api_key", "SILICONFLOW_API_KEY", "SILICONFLOW_API_KEY"),
+                "chat_model": _cfg_value(
+                    embedding_cfg,
+                    "chat_model",
+                    "SILICONFLOW_CHAT_MODEL",
+                    _cfg_value(default_cfg, "chat_model", "DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                ),
+                "embed_model": _cfg_value(embedding_cfg, "embed_model", "SILICONFLOW_EMBED_MODEL", "BAAI/bge-m3"),
+                "client_backend": _cfg_value(embedding_cfg, "client_backend", "SILICONFLOW_CLIENT_BACKEND", "sdk"),
             },
         }
 
         memu_dir = ensure_dir(self.workspace / ".memu")
-        db_dsn = os.getenv("MEMU_DB_DSN")
+        db_dsn = None
+        if memu_cfg and getattr(memu_cfg, "db_dsn", None):
+            db_dsn = memu_cfg.db_dsn
+        if not db_dsn:
+            db_dsn = os.getenv("MEMU_DB_DSN")
         if not db_dsn:
             db_path = (memu_dir / "memu.db").resolve()
             db_dsn = f"sqlite:///{db_path}"

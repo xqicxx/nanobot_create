@@ -55,6 +55,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         memory_adapter: MemoryAdapter | None = None,
+        memu_config: Any | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -71,7 +72,14 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         
         self.context = ContextBuilder(workspace)
-        self.memory_adapter = memory_adapter or MemoryAdapter(workspace=workspace)
+        memu_enabled = True
+        if memu_config is not None:
+            memu_enabled = bool(getattr(memu_config, "enabled", True))
+        self.memory_adapter = memory_adapter or MemoryAdapter(
+            workspace=workspace,
+            enable_memory=memu_enabled,
+            memu_config=memu_config,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.confirmations = ConfirmationStore(ttl_seconds=300)

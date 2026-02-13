@@ -367,6 +367,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        memu_config=config.memu,
     )
     
     # Set cron callback (needs agent)
@@ -471,6 +472,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         subtask_model=config.agents.subtask.model,
         subtask_timeout=config.agents.subtask.timeout_seconds,
+        memu_config=config.memu,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on

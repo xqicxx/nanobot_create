@@ -198,6 +198,42 @@ class ProvidersConfig(BaseModel):
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
 
 
+class MemuLLMConfig(BaseModel):
+    """MemU LLM profile configuration."""
+    provider: str = "openai"
+    base_url: str = ""
+    api_key: str = ""
+    chat_model: str = ""
+    embed_model: str = ""
+    client_backend: str = "sdk"
+
+
+def _default_memu_llm() -> MemuLLMConfig:
+    return MemuLLMConfig(
+        provider="openai",
+        base_url="https://api.deepseek.com/v1",
+        chat_model="deepseek-chat",
+        client_backend="sdk",
+    )
+
+
+def _default_memu_embedding() -> MemuLLMConfig:
+    return MemuLLMConfig(
+        provider="openai",
+        base_url="https://api.siliconflow.cn/v1",
+        embed_model="BAAI/bge-m3",
+        client_backend="sdk",
+    )
+
+
+class MemuConfig(BaseModel):
+    """MemU configuration (LLM profiles + persistence)."""
+    enabled: bool = True
+    db_dsn: str | None = None
+    default: MemuLLMConfig = Field(default_factory=_default_memu_llm)
+    embedding: MemuLLMConfig = Field(default_factory=_default_memu_embedding)
+
+
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""
     host: str = "0.0.0.0"
@@ -232,6 +268,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    memu: MemuConfig = Field(default_factory=MemuConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     

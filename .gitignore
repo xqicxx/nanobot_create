@@ -20,3 +20,4 @@ poetry.lock
 tests/*
 !tests/test_memory_adapter.py
 botpy.log
+.DS_Store
