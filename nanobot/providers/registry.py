@@ -141,6 +141,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # StepFun: OpenAI-compatible API (https://api.stepfun.com/v1).
+    # Requires "openai/" prefix for LiteLLM routing.
+    ProviderSpec(
+        name="stepfun",
+        keywords=("stepfun", "step-"),
+        env_key="OPENAI_API_KEY",
+        display_name="StepFun",
+        litellm_prefix="openai",            # step-3.5-flash → openai/step-3.5-flash
+        skip_prefixes=("openai/",),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="https://api.stepfun.com/v1",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
+
     # DeepSeek: needs "deepseek/" prefix for LiteLLM routing.
     ProviderSpec(
         name="deepseek",
