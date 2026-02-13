@@ -1348,7 +1348,7 @@ class AgentLoop:
         stream_callback: Any | None = None,
     ) -> OutboundMessage | None:
         start = time.perf_counter()
-        response = await self._process_message_impl(msg)
+        response = await self._process_message_impl(msg, stream_callback=stream_callback)
         elapsed_ms = (time.perf_counter() - start) * 1000
         try:
             content_len = len(msg.content or "")
@@ -1364,7 +1364,11 @@ class AgentLoop:
         )
         return response
 
-    async def _process_message_impl(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _process_message_impl(
+        self,
+        msg: InboundMessage,
+        stream_callback: Any | None = None,
+    ) -> OutboundMessage | None:
         """
         Process a single inbound message.
         
