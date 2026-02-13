@@ -275,14 +275,17 @@ export class WhatsAppClient {
       throw new Error('Not connected');
     }
 
-    // Try to look "online" to the recipient before sending.
-    await this.sendPresenceAvailable(to);
     const alt = this.altFor(to);
-    if (alt) {
+    const toIsLid = to.endsWith('@lid');
+    const target = toIsLid && alt ? alt : to;
+
+    // Try to look "online" to the recipient before sending.
+    await this.sendPresenceAvailable(target);
+    if (alt && alt !== target) {
       await this.sendPresenceAvailable(alt);
     }
 
-    await this.sock.sendMessage(to, { text });
+    await this.sock.sendMessage(target, { text });
   }
 
   async sendPresence(to: string, presence: 'composing' | 'paused' | 'available'): Promise<void> {
