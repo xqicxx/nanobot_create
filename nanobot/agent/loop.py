@@ -64,6 +64,10 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.subtask_model = subtask_model
+        # Normalize common alias models early (e.g. "minimax" → "minimax/MiniMax-M2.1")
+        self.model = self._normalize_model_alias(self.model)
+        if self.subtask_model:
+            self.subtask_model = self._normalize_model_alias(self.subtask_model)
         self.subtask_timeout = subtask_timeout
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
@@ -236,12 +240,12 @@ class AgentLoop:
         return None
 
     def _get_session_model(self, session: "Session") -> str:
-        model = session.metadata.get("model")
-        return model or self.model
+        model = session.metadata.get("model") or self.model
+        return self._normalize_model_alias(model)
 
     def _get_session_subtask_model(self, session: "Session") -> str:
-        model = session.metadata.get("subtask_model")
-        return model or self.subtask_model or self._get_session_model(session)
+        model = session.metadata.get("subtask_model") or self.subtask_model or self._get_session_model(session)
+        return self._normalize_model_alias(model)
 
     def _truncate(self, text: str, max_len: int = 200) -> str:
         clean = " ".join(text.split())
@@ -818,6 +822,23 @@ class AgentLoop:
             f"{tasks}\n"
             "用 /subtask list 查看进度，用 /subtask <id> 查看详情。"
         )
+
+    def _normalize_model_alias(self, model: str | None) -> str | None:
+        if not model:
+            return model
+        raw = model.strip()
+        lowered = raw.lower()
+        alias_defaults = {
+            "step": "step-3.5-flash",
+            "stepfun": "step-3.5-flash",
+            "fast": "step-3.5-flash",
+            "flash": "step-3.5-flash",
+            "minimax": "minimax/MiniMax-M2.1",
+        }
+        target = alias_defaults.get(lowered)
+        if target and self._model_is_configured(target):
+            return target
+        return model
 
     def _collect_model_candidates(self, session: "Session") -> list[str]:
         from nanobot.config.loader import load_config
