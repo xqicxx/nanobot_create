@@ -13,7 +13,7 @@ replace it with MemU (long-term, structured memory).
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.13+
 - MemU package available (`memu-py`)
 - LLM and embedding API keys configured
 

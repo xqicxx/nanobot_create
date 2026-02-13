@@ -131,6 +131,26 @@ class MemoryAdapter:
         blob_config = {
             "resources_dir": str(self.resources_dir),
         }
+        llm_profiles = {
+            "default": {
+                "provider": os.getenv("DEEPSEEK_PROVIDER", "openai"),
+                "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+                "api_key": os.getenv("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
+                "chat_model": os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                "client_backend": os.getenv("DEEPSEEK_CLIENT_BACKEND", "sdk"),
+            },
+            "embedding": {
+                "provider": os.getenv("SILICONFLOW_PROVIDER", "openai"),
+                "base_url": os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+                "api_key": os.getenv("SILICONFLOW_API_KEY", "SILICONFLOW_API_KEY"),
+                "chat_model": os.getenv(
+                    "SILICONFLOW_CHAT_MODEL",
+                    os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                ),
+                "embed_model": os.getenv("SILICONFLOW_EMBED_MODEL", "BAAI/bge-m3"),
+                "client_backend": os.getenv("SILICONFLOW_CLIENT_BACKEND", "sdk"),
+            },
+        }
 
         memu_dir = ensure_dir(self.workspace / ".memu")
         db_dsn = os.getenv("MEMU_DB_DSN")
@@ -142,6 +162,7 @@ class MemoryAdapter:
         }
 
         return MemoryService(
+            llm_profiles=llm_profiles,
             retrieve_config=retrieve_config,
             memorize_config=memorize_config,
             blob_config=blob_config,
