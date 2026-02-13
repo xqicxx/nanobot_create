@@ -887,6 +887,20 @@ class AgentLoop:
         # Known candidates (session + defaults)
         candidates = self._collect_model_candidates(session)
 
+        # Common shorthand: "fast"/"flash" → a Flash model (prefer known matches).
+        if raw.lower() in {"fast", "flash"}:
+            flash_matches = [
+                m for m in candidates
+                if "flash" in m.lower() and self._model_is_configured(m)
+            ]
+            if len(flash_matches) == 1:
+                return flash_matches[0], None
+            if len(flash_matches) > 1:
+                options = " / ".join(flash_matches[:5])
+                return None, f"发现多个可选模型，请选择其一：{options}"
+            if self._model_is_configured("step-3.5-flash"):
+                return "step-3.5-flash", None
+
         # Provider alias like "step" or "minimax"
         provider_name = self._match_provider_alias(raw)
         if provider_name:
