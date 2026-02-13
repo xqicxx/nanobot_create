@@ -134,7 +134,7 @@ class WhatsAppChannel(BaseChannel):
                     dropped = self._seen_message_ids.popleft()
                     self._seen_message_ids_set.discard(dropped)
             
-            # Extract just the phone number or lid as chat_id
+            # Prefer phone-number JID (remoteJidAlt) for replies when available.
             user_id = pn if pn else sender
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
             logger.info(f"Sender {sender}")
@@ -146,7 +146,7 @@ class WhatsAppChannel(BaseChannel):
             
             await self._handle_message(
                 sender_id=sender_id,
-                chat_id=sender,  # Use full LID for replies
+                chat_id=user_id,
                 content=content,
                 metadata={
                     "message_id": message_id,
