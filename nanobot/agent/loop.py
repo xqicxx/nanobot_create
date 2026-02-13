@@ -364,6 +364,104 @@ class AgentLoop:
         lines.append("子任务：/model sub <模型名> | /model sub reset")
         return "\n".join(lines)
 
+    def _format_memu_status(self, status: dict[str, Any], run_checks: bool) -> str:
+        lines: list[str] = []
+        enabled = status.get("enabled", False)
+        lines.append(f"MemU: {'启用' if enabled else '禁用'}")
+        if not enabled:
+            lines.append("用法：/memu status")
+            return "\n".join(lines)
+
+        llm = status.get("llm", {}) or {}
+        embedding = status.get("embedding", {}) or {}
+        db = status.get("db", {}) or {}
+        health = status.get("health") or {}
+
+        def _fmt_key(flag: bool | None) -> str:
+            if flag is None:
+                return "?"
+            return "✓" if flag else "✗"
+
+        if llm:
+            lines.append(
+                "LLM(default): "
+                f"provider={llm.get('provider')}, "
+                f"base_url={llm.get('base_url')}, "
+                f"api_key={_fmt_key(llm.get('api_key_set'))}, "
+                f"chat_model={llm.get('chat_model')}"
+            )
+        if embedding:
+            lines.append(
+                "Embedding: "
+                f"provider={embedding.get('provider')}, "
+                f"base_url={embedding.get('base_url')}, "
+                f"api_key={_fmt_key(embedding.get('api_key_set'))}, "
+                f"embed_model={embedding.get('embed_model')}"
+            )
+        if db:
+            lines.append(f"DB: {db.get('provider')} {db.get('dsn')}")
+
+        if health:
+            ok = health.get("ok")
+            lines.append(f"Health: {'ok' if ok else 'error'}")
+            counts = health.get("counts")
+            if counts:
+                lines.append(f"Counts: categories={counts.get('categories')}, items={counts.get('items')}")
+            if health.get("restart_required"):
+                lines.append("Restart required: yes")
+            if health.get("error"):
+                lines.append(f"Health error: {health.get('error')}")
+
+        checks = status.get("checks", {}) or {}
+        if run_checks and checks:
+            def _fmt_check(name: str) -> str:
+                chk = checks.get(name, {})
+                if chk.get("ok") is True:
+                    extra = ""
+                    if "items" in chk:
+                        extra = f" (items={chk.get('items')})"
+                    return f"{name}: ok{extra}"
+                if chk.get("ok") is False:
+                    if chk.get("skipped"):
+                        return f"{name}: skipped ({chk.get('skipped')})"
+                    return f"{name}: error ({chk.get('error')})"
+                return f"{name}: unknown"
+
+            lines.append("Checks:")
+            lines.append(_fmt_check("embedding"))
+            lines.append(_fmt_check("write"))
+            lines.append(_fmt_check("retrieve"))
+        else:
+            lines.append("Checks: skipped (use /memu status to run)")
+
+        return "\n".join(lines)
+
+    async def _handle_memu_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        raw = (msg.content or "").strip()
+        if not raw.startswith("/memu"):
+            return None
+
+        parts = raw.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else "status"
+        arg_lower = arg.lower()
+
+        if arg_lower in {"help", "?"}:
+            content = "用法：/memu status [fast]"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        run_checks = True
+        if "fast" in arg_lower or "quick" in arg_lower:
+            run_checks = False
+
+        status = await self.memory_adapter.memu_status(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            run_checks=run_checks,
+        )
+        content = self._format_memu_status(status, run_checks)
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
     def _handle_subtask_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = msg.content.strip()
         if not raw.startswith("/subtask"):
@@ -932,6 +1030,16 @@ class AgentLoop:
         session_model = self._get_session_model(session)
         self._current_session_model = session_model
         self._current_session_subtask_model = self._get_session_subtask_model(session)
+
+        # Handle /model commands before LLM
+        memu_response = await self._handle_memu_command(msg)
+        if memu_response:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", memu_response.content)
+            self.sessions.save(session)
+            self._current_session_model = None
+            self._current_session_subtask_model = None
+            return memu_response
 
         # Handle /model commands before LLM
         model_response = self._handle_model_command(msg, session, session_model)

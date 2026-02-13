@@ -289,6 +289,131 @@ class MemoryAdapter:
         except Exception as exc:
             logger.warning(f"MemU memorize failed: {exc}")
 
+    async def memu_status(
+        self,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        sender_id: str | None = None,
+        run_checks: bool = True,
+    ) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "enabled": bool(self.enable_memory and self._memu is not None),
+            "llm": {},
+            "embedding": {},
+            "db": {},
+            "health": None,
+            "checks": {},
+        }
+        if not status["enabled"]:
+            return status
+
+        memu = self._memu
+
+        # Pull resolved profile config from MemU (env+config already merged there).
+        profiles = getattr(memu, "llm_profiles", None)
+        profile_map = profiles.profiles if profiles is not None else {}
+
+        def _profile_info(name: str) -> dict[str, Any]:
+            cfg = profile_map.get(name)
+            if cfg is None:
+                return {"configured": False}
+            api_missing = False
+            if hasattr(memu, "_is_missing_api_key"):
+                api_missing = memu._is_missing_api_key(cfg.api_key)
+            return {
+                "configured": True,
+                "provider": cfg.provider,
+                "base_url": cfg.base_url,
+                "chat_model": cfg.chat_model,
+                "embed_model": cfg.embed_model,
+                "api_key_set": not api_missing,
+            }
+
+        status["llm"] = _profile_info("default")
+        status["embedding"] = _profile_info("embedding")
+
+        db_cfg = getattr(memu, "database_config", None)
+        if db_cfg is not None:
+            status["db"] = {
+                "provider": db_cfg.metadata_store.provider,
+                "dsn": db_cfg.metadata_store.dsn,
+            }
+
+        try:
+            status["health"] = await memu.health(
+                user={"user_id": self.build_user_id(channel, chat_id, sender_id)},
+                include_counts=True,
+            )
+        except Exception as exc:
+            status["health"] = {"ok": False, "error": str(exc)}
+
+        if not run_checks:
+            return status
+
+        test_user_id = self.build_user_id("memu-status", "healthcheck", "system")
+        test_path = None
+        try:
+            # Embedding check
+            if status["embedding"].get("api_key_set"):
+                try:
+                    embed_client = memu._get_llm_client("embedding")
+                    vecs = await embed_client.embed(["memu health check"])
+                    status["checks"]["embedding"] = {"ok": bool(vecs)}
+                except Exception as exc:
+                    status["checks"]["embedding"] = {"ok": False, "error": str(exc)}
+            else:
+                status["checks"]["embedding"] = {"ok": False, "skipped": "missing_api_key"}
+
+            # Write + vector pipeline check (memorize + retrieve)
+            if status["llm"].get("api_key_set") and status["embedding"].get("api_key_set"):
+                payload = {
+                    "messages": [
+                        {"role": "user", "content": "memu health check"},
+                        {"role": "assistant", "content": "ok"},
+                    ],
+                    "metadata": {"healthcheck": True},
+                    "user_id": test_user_id,
+                }
+                timestamp = datetime.now().isoformat().replace(":", "-")
+                filename = safe_filename(f"healthcheck_{timestamp}.json")
+                test_path = self.resources_dir / filename
+                test_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                try:
+                    await memu.memorize(
+                        resource_url=str(test_path),
+                        modality="conversation",
+                        user={"user_id": test_user_id},
+                    )
+                    status["checks"]["write"] = {"ok": True}
+                except Exception as exc:
+                    status["checks"]["write"] = {"ok": False, "error": str(exc)}
+
+                try:
+                    result = await memu.retrieve(
+                        queries=[{"role": "user", "content": {"text": "memu health check"}}],
+                        where={"user_id": test_user_id},
+                    )
+                    status["checks"]["retrieve"] = {"ok": True, "items": len(result.get("items", []))}
+                except Exception as exc:
+                    status["checks"]["retrieve"] = {"ok": False, "error": str(exc)}
+            else:
+                status["checks"]["write"] = {"ok": False, "skipped": "missing_api_key"}
+                status["checks"]["retrieve"] = {"ok": False, "skipped": "missing_api_key"}
+        finally:
+            try:
+                await memu.clear_memory(where={"user_id": test_user_id})
+            except Exception:
+                pass
+            if test_path and test_path.exists():
+                try:
+                    test_path.unlink()
+                except Exception:
+                    pass
+
+        return status
+
     async def query_items(
         self,
         *,
