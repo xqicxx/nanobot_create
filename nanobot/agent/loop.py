@@ -5,7 +5,7 @@ import json
 import time
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote_plus
 
 from loguru import logger
@@ -28,6 +28,78 @@ from nanobot.agent.tools.delegate import DelegateTool
 from nanobot.agent.subagent import SubagentManager, SpawnResult
 from nanobot.session.manager import SessionManager
 
+
+class _StreamBuffer:
+    def __init__(
+        self,
+        *,
+        bus: MessageBus,
+        channel: str,
+        chat_id: str,
+        min_chunk: int = 60,
+        max_chunk: int = 320,
+        min_interval: float = 0.6,
+    ) -> None:
+        self._bus = bus
+        self._channel = channel
+        self._chat_id = chat_id
+        self._min_chunk = max(1, min_chunk)
+        self._max_chunk = max(self._min_chunk, max_chunk)
+        self._min_interval = max(0.0, min_interval)
+        self._buffer: str = ""
+        self._sent_any = False
+        self._last_flush = 0.0
+        self._flush_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def sent_any(self) -> bool:
+        return self._sent_any
+
+    def on_token(self, token: str) -> None:
+        if not token:
+            return
+        self._buffer += token
+        if len(self._buffer) >= self._max_chunk or ("\n" in token and len(self._buffer) >= self._min_chunk):
+            self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        if self._flush_task and not self._flush_task.done():
+            return
+        loop = asyncio.get_running_loop()
+        self._flush_task = loop.create_task(self._flush(force=False))
+
+    async def _flush(self, *, force: bool) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            if (
+                not force
+                and len(self._buffer) < self._min_chunk
+                and (now - self._last_flush) < self._min_interval
+            ):
+                return
+
+            while self._buffer:
+                if not force and len(self._buffer) < self._min_chunk:
+                    break
+                chunk = self._buffer[: self._max_chunk]
+                self._buffer = self._buffer[len(chunk):]
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=self._channel,
+                        chat_id=self._chat_id,
+                        content=chunk,
+                    )
+                )
+                self._sent_any = True
+                self._last_flush = time.monotonic()
+                if not force and (time.monotonic() - self._last_flush) < self._min_interval:
+                    break
+
+    async def finish(self) -> None:
+        if self._flush_task and not self._flush_task.done():
+            await self._flush_task
+        await self._flush(force=True)
 
 class AgentLoop:
     """
@@ -219,7 +291,23 @@ class AgentLoop:
                 
                 # Process it
                 try:
-                    response = await self._process_message(msg)
+                    stream_buffer: _StreamBuffer | None = None
+                    stream_callback: Callable[[str], None] | None = None
+                    if self._should_stream_channel(msg.channel) and msg.channel != "cli":
+                        stream_buffer = _StreamBuffer(
+                            bus=self.bus,
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                        )
+                        stream_callback = stream_buffer.on_token
+
+                    response = await self._process_message(msg, stream_callback=stream_callback)
+
+                    if stream_buffer is not None:
+                        await stream_buffer.finish()
+                        if stream_buffer.sent_any:
+                            continue
+
                     if response:
                         await self.bus.publish_outbound(response)
                 except Exception as e:
@@ -724,6 +812,15 @@ class AgentLoop:
     def _should_stream(self, channel: str | None, stream_callback: Any | None) -> bool:
         if not stream_callback:
             return False
+        if not self.stream_enabled:
+            return False
+        if not channel:
+            return False
+        if not self.stream_channels:
+            return False
+        return channel in self.stream_channels
+
+    def _should_stream_channel(self, channel: str | None) -> bool:
         if not self.stream_enabled:
             return False
         if not channel:
