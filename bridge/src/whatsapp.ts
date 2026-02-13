@@ -269,17 +269,33 @@ export class WhatsAppClient {
       throw new Error('Not connected');
     }
 
-    const alt = this.altFor(to);
-    const toIsLid = to.endsWith('@lid');
-    const target = toIsLid && alt ? alt : to;
+    const normalized = this.normalizeJid(to);
+    const alt = this.altFor(normalized);
+    const preferLid = alt && alt.endsWith('@lid') ? alt : normalized;
+    const fallback = alt && alt !== preferLid ? alt : normalized !== preferLid ? normalized : null;
 
     // Try to look "online" to the recipient before sending.
-    await this.sendPresenceAvailable(target);
-    if (alt && alt !== target) {
-      await this.sendPresenceAvailable(alt);
+    await this.sendPresenceAvailable(preferLid);
+    if (fallback && fallback !== preferLid) {
+      await this.sendPresenceAvailable(fallback);
     }
 
-    await this.sock.sendMessage(target, { text });
+    try {
+      await this.sock.sendMessage(preferLid, { text });
+    } catch (err) {
+      if (!fallback || fallback === preferLid) throw err;
+      if (WA_DEBUG) console.error('sendMessage failed, retrying with fallback jid:', err);
+      await this.sock.sendMessage(fallback, { text });
+    }
+  }
+
+  private normalizeJid(to: string): string {
+    if (!to) return to;
+    if (to.includes('@')) return to;
+    if (/^\d+$/.test(to)) {
+      return `${to}@s.whatsapp.net`;
+    }
+    return to;
   }
 
   async sendPresence(to: string, presence: 'composing' | 'paused' | 'available'): Promise<void> {
