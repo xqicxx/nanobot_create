@@ -160,8 +160,6 @@ def is_readonly_command(command: str) -> bool:
 def classify_command(command: str) -> CommandCheck:
     readonly_allowed = is_readonly_command(command)
     dangerous = has_dangerous_shell_syntax(command)
-    if dangerous and is_readonly_pipeline(command):
-        dangerous = False
     return CommandCheck(
         readonly_allowed=readonly_allowed,
         high_risk=is_high_risk_command(command),

@@ -13,6 +13,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.memory_adapter import MemoryAdapter
 from nanobot.agent.confirmations import ConfirmationStore
 from nanobot.agent.subtask_output import parse_subtask_output
 from nanobot.agent.tools.registry import ToolRegistry
@@ -53,6 +54,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        memory_adapter: MemoryAdapter | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -69,6 +71,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         
         self.context = ContextBuilder(workspace)
+        self.memory_adapter = memory_adapter or MemoryAdapter(workspace=workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.confirmations = ConfirmationStore(ttl_seconds=300)
@@ -101,6 +104,16 @@ class AgentLoop:
         
         self._running = False
         self._register_default_tools()
+
+    @staticmethod
+    def _get_previous_user_message(messages: list[dict[str, Any]]) -> str | None:
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and not content.startswith("[System:"):
+                return content
+        return None
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -897,12 +910,28 @@ class AgentLoop:
                 delegate_tool.set_context(msg.channel, msg.chat_id)
         
         # Build initial messages (use get_history for LLM-formatted messages)
+        memory_context = ""
+        if msg.channel != "system":
+            try:
+                memory_context = (
+                    await self.memory_adapter.retrieve_context(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        sender_id=msg.sender_id,
+                        history=session.get_history(),
+                        current_message=msg.content,
+                    )
+                ).text
+            except Exception as exc:
+                logger.warning(f"MemU context fetch failed: {exc}")
+
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            memory_context=memory_context,
         )
         
         # Agent loop
@@ -1022,6 +1051,24 @@ class AgentLoop:
         self.sessions.save(session)
         self._current_session_model = None
         self._current_session_subtask_model = None
+
+        # Persist memory via MemU (skip system messages and low-signal content)
+        if msg.channel != "system":
+            previous_user = self._get_previous_user_message(session.messages[:-2])
+            if not self.memory_adapter.should_skip_write(msg.content, previous_user):
+                await self.memory_adapter.memorize_turn(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    sender_id=msg.sender_id,
+                    user_message=msg.content,
+                    assistant_message=final_content,
+                    metadata={
+                        "session_key": msg.session_key,
+                        "channel": msg.channel,
+                        "chat_id": msg.chat_id,
+                        "sender_id": msg.sender_id,
+                    },
+                )
         
         return OutboundMessage(
             channel=msg.channel,
@@ -1140,11 +1187,27 @@ class AgentLoop:
             )
 
         # Build messages with the announce content
+        memory_context = ""
+        if msg.channel != "system":
+            try:
+                memory_context = (
+                    await self.memory_adapter.retrieve_context(
+                        channel=origin_channel,
+                        chat_id=origin_chat_id,
+                        sender_id=msg.sender_id,
+                        history=session.get_history(),
+                        current_message=msg.content,
+                    )
+                ).text
+            except Exception as exc:
+                logger.warning(f"MemU context fetch failed: {exc}")
+
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
+            memory_context=memory_context,
         )
         
         # Agent loop (limited for announce handling)

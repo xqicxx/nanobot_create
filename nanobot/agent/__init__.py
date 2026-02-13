@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__all__ = ["AgentLoop", "ContextBuilder", "MemoryStore", "SkillsLoader"]
+__all__ = ["AgentLoop", "ContextBuilder", "MemoryAdapter", "SkillsLoader"]
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
     from nanobot.agent.context import ContextBuilder
-    from nanobot.agent.memory import MemoryStore
+    from nanobot.agent.memory_adapter import MemoryAdapter
     from nanobot.agent.skills import SkillsLoader
 
 
@@ -20,9 +20,9 @@ def __getattr__(name: str):
     if name == "ContextBuilder":
         from nanobot.agent.context import ContextBuilder
         return ContextBuilder
-    if name == "MemoryStore":
-        from nanobot.agent.memory import MemoryStore
-        return MemoryStore
+    if name == "MemoryAdapter":
+        from nanobot.agent.memory_adapter import MemoryAdapter
+        return MemoryAdapter
     if name == "SkillsLoader":
         from nanobot.agent.skills import SkillsLoader
         return SkillsLoader

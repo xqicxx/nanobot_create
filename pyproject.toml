@@ -38,6 +38,7 @@ dependencies = [
     "qq-botpy>=1.0.0",
     "python-socks[asyncio]>=2.4.0",
     "pyyaml>=6.0",
+    "memu-py>=0.1.0",
 ]
 
 [project.optional-dependencies]
