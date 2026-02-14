@@ -2480,9 +2480,13 @@ class AgentLoop:
                 # Call LLM
                 llm_start = time.perf_counter()
                 use_stream = self._should_stream(msg.channel, stream_callback, model=session_model)
-                if use_stream and self._is_minimax_model(session_model) and stream_callback is None:
+                if use_stream and stream_callback is None and (
+                    self._is_minimax_model(session_model) or self._is_stepfun_model(session_model)
+                ):
+                    provider_name = "MiniMax" if self._is_minimax_model(session_model) else "StepFun"
                     logger.info(
-                        "MiniMax native streaming enabled (provider-side, outbound chunk streaming disabled)"
+                        "{} native streaming enabled (provider-side, outbound chunk streaming disabled)",
+                        provider_name,
                     )
                 response = await self._get_provider_for_model(session_model).chat(
                     messages=messages,
