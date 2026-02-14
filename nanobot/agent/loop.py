@@ -1451,19 +1451,29 @@ class AgentLoop:
         prompt = self._build_image_analysis_prompt(msg.content or "")
         analyses: list[str] = []
         for idx, image_src in enumerate(images, start=1):
+            vision_start = time.perf_counter()
             result = await self.tools.execute(
                 "understand_image",
                 {"prompt": prompt, "image_source": image_src},
             )
+            vision_ms = int(round((time.perf_counter() - vision_start) * 1000))
             if isinstance(result, str) and result.startswith("Error:"):
                 logger.warning(
-                    "understand_image failed (channel={}, sender={}, source={}): {}",
+                    "understand_image failed in {}ms (channel={}, sender={}, source={}): {}",
+                    vision_ms,
                     msg.channel,
                     msg.sender_id,
                     image_src,
                     result,
                 )
                 continue
+            logger.info(
+                "understand_image completed in {}ms (channel={}, sender={}, source={})",
+                vision_ms,
+                msg.channel,
+                msg.sender_id,
+                image_src,
+            )
             analyses.append(f"[Image {idx}]\n{result}")
 
         if not analyses:
