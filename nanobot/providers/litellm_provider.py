@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
@@ -98,6 +99,148 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
+
+    def _infer_provider_spec(self, model: str):
+        spec = find_by_model(model)
+        if spec:
+            return spec
+        if "/" in model:
+            suffix = model.split("/", 1)[1]
+            return find_by_model(suffix)
+        return None
+
+    @staticmethod
+    def _strip_native_prefix(model: str) -> str:
+        for prefix in ("openai/", "stepfun/", "minimax/"):
+            if model.lower().startswith(prefix):
+                return model[len(prefix):]
+        return model
+
+    async def _chat_native_stream(
+        self,
+        *,
+        requested_model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int,
+        temperature: float,
+        on_token: Callable[[str], None] | None,
+    ) -> LLMResponse | None:
+        """
+        Stream with provider-native OpenAI-compatible SDK for StepFun/MiniMax.
+        Falls back to LiteLLM when unavailable.
+        """
+        if self._gateway:
+            return None
+
+        spec = self._infer_provider_spec(requested_model)
+        if not spec or spec.name not in {"stepfun", "minimax"}:
+            return None
+
+        api_key = self.api_key or os.getenv(spec.env_key)
+        base_url = self.api_base or spec.default_api_base
+        if not api_key or not base_url:
+            return None
+
+        try:
+            from openai import AsyncOpenAI
+        except Exception:
+            return None
+
+        model_name = self._strip_native_prefix(requested_model)
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=self.extra_headers or None,
+        )
+        try:
+            stream = await client.chat.completions.create(**kwargs)
+            content_parts: list[str] = []
+            tool_call_map: dict[int, dict[str, Any]] = {}
+            finish_reason = "stop"
+
+            async for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                if choice and getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason or finish_reason
+                delta = getattr(choice, "delta", None) if choice else None
+                if delta is None:
+                    continue
+
+                delta_content = getattr(delta, "content", None)
+                if delta_content:
+                    content_parts.append(delta_content)
+                    if on_token:
+                        on_token(delta_content)
+
+                delta_tool_calls = getattr(delta, "tool_calls", None)
+                if delta_tool_calls:
+                    for tc in delta_tool_calls:
+                        idx = getattr(tc, "index", 0) or 0
+                        entry = tool_call_map.setdefault(
+                            idx,
+                            {"id": None, "name": None, "arguments": ""},
+                        )
+                        if getattr(tc, "id", None):
+                            entry["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                entry["name"] = fn.name
+                            if getattr(fn, "arguments", None):
+                                entry["arguments"] += fn.arguments
+
+            tool_calls: list[ToolCallRequest] = []
+            if tool_call_map:
+                for idx in sorted(tool_call_map.keys()):
+                    entry = tool_call_map[idx]
+                    args = entry.get("arguments", "")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {"raw": args}
+                    tool_calls.append(
+                        ToolCallRequest(
+                            id=entry.get("id") or f"tool_{idx}",
+                            name=entry.get("name") or "tool",
+                            arguments=args,
+                        )
+                    )
+
+            return LLMResponse(
+                content="".join(content_parts) if content_parts else None,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Native stream failed for provider={} model={}: {}. Fallback to LiteLLM stream.",
+                spec.name,
+                requested_model,
+                exc,
+            )
+            return None
+        finally:
+            close_fn = getattr(client, "close", None)
+            if close_fn:
+                try:
+                    maybe_awaitable = close_fn()
+                    if hasattr(maybe_awaitable, "__await__"):
+                        await maybe_awaitable
+                except Exception:
+                    pass
     
     async def chat(
         self,
@@ -122,7 +265,8 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        model = self._resolve_model(model or self.default_model)
+        requested_model = model or self.default_model
+        model = self._resolve_model(requested_model)
         
         kwargs: dict[str, Any] = {
             "model": model,
@@ -152,6 +296,16 @@ class LiteLLMProvider(LLMProvider):
         
         try:
             if stream:
+                native = await self._chat_native_stream(
+                    requested_model=requested_model,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    on_token=on_token,
+                )
+                if native is not None:
+                    return native
                 kwargs["stream"] = True
                 response = await acompletion(**kwargs)
                 content_parts: list[str] = []

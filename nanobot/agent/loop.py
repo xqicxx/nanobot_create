@@ -139,7 +139,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.subtask_model = subtask_model
-        # Normalize common alias models early (e.g. "minimax" → "minimax/MiniMax-M2.1")
+        # Normalize common alias models early (e.g. "minimax" → "minimax/MiniMax-M2.5")
         self.model = self._normalize_model_alias(self.model)
         if self.subtask_model:
             self.subtask_model = self._normalize_model_alias(self.subtask_model)
@@ -1034,7 +1034,7 @@ class AgentLoop:
             "stepfun": "step-3.5-flash",
             "fast": "step-3.5-flash",
             "flash": "step-3.5-flash",
-            "minimax": "minimax/MiniMax-M2.1",
+            "minimax": "minimax/MiniMax-M2.5",
         }
         target = alias_defaults.get(lowered)
         if target and self._model_is_configured(target):
@@ -1158,7 +1158,7 @@ class AgentLoop:
             # Built-in defaults for common providers
             defaults = {
                 "stepfun": ["step-3.5-flash"],
-                "minimax": ["minimax/MiniMax-M2.1"],
+                "minimax": ["minimax/MiniMax-M2.5"],
             }
             for m in defaults.get(provider_name, []):
                 if m not in provider_candidates and self._model_is_configured(m):
