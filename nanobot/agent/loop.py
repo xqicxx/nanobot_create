@@ -35,6 +35,91 @@ from nanobot.agent.subagent import SubagentManager, SpawnResult
 from nanobot.session.manager import SessionManager
 
 
+class _ThinkTagFilter:
+    """Incrementally remove <think>...</think> sections from model output."""
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+    _OPEN_KEEP = len(_OPEN) - 1
+    _CLOSE_KEEP = len(_CLOSE) - 1
+
+    def __init__(self, emit_callback: Callable[[str], None] | None = None) -> None:
+        self._emit_callback = emit_callback
+        self._buffer = ""
+        self._in_think = False
+        self._visible_parts: list[str] = []
+        self._hidden_parts: list[str] = []
+
+    @property
+    def visible_text(self) -> str:
+        return "".join(self._visible_parts)
+
+    @property
+    def hidden_text(self) -> str:
+        return "".join(self._hidden_parts)
+
+    def _emit_visible(self, text: str) -> None:
+        if not text:
+            return
+        self._visible_parts.append(text)
+        if self._emit_callback:
+            self._emit_callback(text)
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        self._buffer += text
+        self._drain(force=False)
+
+    def finish(self) -> None:
+        self._drain(force=True)
+
+    def _drain(self, *, force: bool) -> None:
+        while True:
+            lower_buf = self._buffer.lower()
+            if not self._in_think:
+                open_idx = lower_buf.find(self._OPEN)
+                if open_idx < 0:
+                    if force:
+                        self._emit_visible(self._buffer)
+                        self._buffer = ""
+                    else:
+                        flush_upto = max(0, len(self._buffer) - self._OPEN_KEEP)
+                        if flush_upto > 0:
+                            self._emit_visible(self._buffer[:flush_upto])
+                            self._buffer = self._buffer[flush_upto:]
+                    return
+                self._emit_visible(self._buffer[:open_idx])
+                self._buffer = self._buffer[open_idx + len(self._OPEN):]
+                self._in_think = True
+                continue
+
+            close_idx = lower_buf.find(self._CLOSE)
+            if close_idx < 0:
+                if force:
+                    if self._buffer:
+                        self._hidden_parts.append(self._buffer)
+                    self._buffer = ""
+                else:
+                    flush_upto = max(0, len(self._buffer) - self._CLOSE_KEEP)
+                    if flush_upto > 0:
+                        self._hidden_parts.append(self._buffer[:flush_upto])
+                        self._buffer = self._buffer[flush_upto:]
+                return
+
+            if close_idx > 0:
+                self._hidden_parts.append(self._buffer[:close_idx])
+            self._buffer = self._buffer[close_idx + len(self._CLOSE):]
+            self._in_think = False
+
+    @classmethod
+    def sanitize_text(cls, text: str) -> tuple[str, str]:
+        flt = cls()
+        flt.feed(text)
+        flt.finish()
+        return flt.visible_text, flt.hidden_text
+
+
 class _StreamBuffer:
     def __init__(
         self,
@@ -430,6 +515,7 @@ class AgentLoop:
                 # Process it
                 try:
                     stream_buffer: _StreamBuffer | None = None
+                    think_filter: _ThinkTagFilter | None = None
                     stream_callback: Callable[[str], None] | None = None
                     if self._should_stream_channel(msg.channel) and msg.channel != "cli":
                         stream_buffer = _StreamBuffer(
@@ -437,11 +523,14 @@ class AgentLoop:
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                         )
-                        stream_callback = stream_buffer.on_token
+                        think_filter = _ThinkTagFilter(emit_callback=stream_buffer.on_token)
+                        stream_callback = think_filter.feed
 
                     response = await self._process_message(msg, stream_callback=stream_callback)
 
                     if stream_buffer is not None:
+                        if think_filter is not None:
+                            think_filter.finish()
                         await stream_buffer.finish()
                         if stream_buffer.sent_any:
                             continue
@@ -481,6 +570,30 @@ class AgentLoop:
     def _truncate(self, text: str, max_len: int = 200) -> str:
         clean = " ".join(text.split())
         return clean if len(clean) <= max_len else clean[:max_len] + "..."
+
+    def _strip_think_for_output(self, text: str | None, *, channel: str, sender_id: str, stage: str) -> str | None:
+        if text is None:
+            return None
+        visible, hidden = _ThinkTagFilter.sanitize_text(str(text))
+        hidden_clean = hidden.strip()
+        if hidden_clean:
+            logger.info(
+                "Hidden <think> content stripped (channel={}, sender={}, stage={}, chars={})",
+                channel,
+                sender_id,
+                stage,
+                len(hidden_clean),
+            )
+            logger.debug(
+                "Hidden think preview (channel={}, sender={}, stage={}): {}",
+                channel,
+                sender_id,
+                stage,
+                self._truncate(hidden_clean, max_len=1200),
+            )
+            if not visible.strip():
+                return "（模型思考过程已隐藏，未生成可展示答案）"
+        return visible
 
     def _split_name_desc(self, payload: str) -> tuple[str, str]:
         if not payload:
@@ -2289,6 +2402,12 @@ class AgentLoop:
         
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+        final_content = self._strip_think_for_output(
+            final_content,
+            channel=msg.channel,
+            sender_id=msg.sender_id,
+            stage="main_response",
+        ) or ""
 
         if (
             "## 我懂你的意思" in final_content
@@ -2561,6 +2680,12 @@ class AgentLoop:
         
         if final_content is None:
             final_content = "Background task completed."
+        final_content = self._strip_think_for_output(
+            final_content,
+            channel=origin_channel,
+            sender_id=msg.sender_id,
+            stage="system_response",
+        ) or ""
         
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
@@ -2601,6 +2726,14 @@ class AgentLoop:
             chat_id=chat_id,
             content=content
         )
-        
-        response = await self._process_message(msg, stream_callback=stream_callback)
+
+        safe_stream_callback = stream_callback
+        think_filter: _ThinkTagFilter | None = None
+        if stream_callback is not None:
+            think_filter = _ThinkTagFilter(emit_callback=stream_callback)
+            safe_stream_callback = think_filter.feed
+
+        response = await self._process_message(msg, stream_callback=safe_stream_callback)
+        if think_filter is not None:
+            think_filter.finish()
         return response.content if response else ""
