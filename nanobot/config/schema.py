@@ -229,7 +229,7 @@ def _default_memu_embedding() -> MemuLLMConfig:
 
 class MemuConfig(BaseModel):
     """MemU configuration (LLM profiles + persistence)."""
-    enabled: bool = True
+    enabled: bool = False
     db_dsn: str | None = None
     default: MemuLLMConfig = Field(default_factory=_default_memu_llm)
     embedding: MemuLLMConfig = Field(default_factory=_default_memu_embedding)
