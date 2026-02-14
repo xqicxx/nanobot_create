@@ -37,9 +37,9 @@ class _StreamBuffer:
         bus: MessageBus,
         channel: str,
         chat_id: str,
-        min_chunk: int = 60,
-        max_chunk: int = 320,
-        min_interval: float = 0.6,
+        min_chunk: int = 80,
+        max_chunk: int = 1200,
+        min_interval: float = 0.8,
     ) -> None:
         self._bus = bus
         self._channel = channel
@@ -61,7 +61,7 @@ class _StreamBuffer:
         if not token:
             return
         self._buffer += token
-        if len(self._buffer) >= self._max_chunk or ("\n" in token and len(self._buffer) >= self._min_chunk):
+        if len(self._buffer) >= self._max_chunk or any(p in token for p in ("\n", "。", "！", "？", ".", "!", "?")):
             self._schedule_flush()
 
     def _schedule_flush(self) -> None:
@@ -69,6 +69,29 @@ class _StreamBuffer:
             return
         loop = asyncio.get_running_loop()
         self._flush_task = loop.create_task(self._flush(force=False))
+
+    def _find_split_index(self, *, force: bool) -> int:
+        if not self._buffer:
+            return 0
+        limit = len(self._buffer) if force else min(len(self._buffer), self._max_chunk)
+        if not force and len(self._buffer) < self._min_chunk:
+            return 0
+
+        sentence_marks = "\n。！？.!?；;"
+        for i in range(limit - 1, -1, -1):
+            ch = self._buffer[i]
+            if ch in sentence_marks and (force or (i + 1) >= self._min_chunk):
+                return i + 1
+
+        if len(self._buffer) >= self._max_chunk:
+            for i in range(limit - 1, -1, -1):
+                if self._buffer[i].isspace() and (force or (i + 1) >= self._min_chunk):
+                    return i + 1
+            return limit
+
+        if force:
+            return limit
+        return 0
 
     async def _flush(self, *, force: bool) -> None:
         async with self._lock:
@@ -81,10 +104,16 @@ class _StreamBuffer:
                 return
 
             while self._buffer:
-                if not force and len(self._buffer) < self._min_chunk:
+                split_idx = self._find_split_index(force=force)
+                if split_idx <= 0:
                     break
-                chunk = self._buffer[: self._max_chunk]
-                self._buffer = self._buffer[len(chunk):]
+                chunk = self._buffer[:split_idx]
+                self._buffer = self._buffer[split_idx:]
+                chunk = chunk.strip()
+                if not chunk:
+                    if not force:
+                        break
+                    continue
                 await self._bus.publish_outbound(
                     OutboundMessage(
                         channel=self._channel,
@@ -94,7 +123,7 @@ class _StreamBuffer:
                 )
                 self._sent_any = True
                 self._last_flush = time.monotonic()
-                if not force and (time.monotonic() - self._last_flush) < self._min_interval:
+                if not force:
                     break
 
     async def finish(self) -> None:
