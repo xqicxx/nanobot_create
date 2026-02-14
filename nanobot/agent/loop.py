@@ -28,6 +28,7 @@ from nanobot.agent.tools.web import (
     UnderstandImageTool,
 )
 from nanobot.agent.tools.message import MessageTool
+from nanobot.session.manager import SessionManager
 
 
 class _ThinkTagFilter:
@@ -393,27 +394,12 @@ class AgentLoop:
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
 
-        # Delegate side-effect tools to subagents
-        write_tool = WriteFileTool(allowed_dir=allowed_dir)
-        self.tools.register(DelegateTool(
-            name=write_tool.name,
-            description=f"{write_tool.description} (delegated to subagent)",
-            parameters=write_tool.parameters,
-        ))
-        edit_tool = EditFileTool(allowed_dir=allowed_dir)
-        self.tools.register(DelegateTool(
-            name=edit_tool.name,
-            description=f"{edit_tool.description} (delegated to subagent)",
-            parameters=edit_tool.parameters,
-        ))
+        # Register file tools
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         if self.cron_service:
             from nanobot.agent.tools.cron import CronTool
-            cron_tool = CronTool(self.cron_service)
-            self.tools.register(DelegateTool(
-                name=cron_tool.name,
-                description=f"{cron_tool.description} (delegated to subagent)",
-                parameters=cron_tool.parameters,
-                    ))
+            self.tools.register(CronTool(self.cron_service))
         
         # Read-only shell tool (delegates when unsafe)
         self.tools.register(ReadOnlyExecTool(
@@ -609,12 +595,9 @@ class AgentLoop:
         ]
         if merged:
             lines.append("已使用模型：" + ", ".join(merged))
-        if merged_subtask:
-            lines.append("已使用子任务模型：" + ", ".join(merged_subtask))
         if configured_providers:
             lines.append("已配置提供商：" + ", ".join(configured_providers))
         lines.append("用法：/model <模型名> | /model list | /model reset")
-        lines.append("子任务：/model sub <模型名> | /model sub reset")
         lines.append("清理历史：/model clean")
         return "\n".join(lines)
 
@@ -934,10 +917,6 @@ class AgentLoop:
         content = self._format_memu_status(status, run_checks)
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    def _handle_subtask_command(self, msg: InboundMessage) -> OutboundMessage | None:
-        """Subtask feature disabled."""
-        return None
-
     def _handle_model_command(
         self,
         msg: InboundMessage,
@@ -956,40 +935,17 @@ class AgentLoop:
             content = (
                 f"当前模型：{current_model}\n"
                 "用法：/model list | /model <模型名> | /model reset\n"
-                "子任务：/model sub <模型名> | /model sub reset\n"
                 "清理历史：/model clean"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-        if arg_lower.startswith("sub"):
-            sub_parts = arg.split(None, 1)
-            sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
-            sub_lower = sub_arg.lower()
-            if not sub_arg:
-                content = (
-                    "用法：/model sub <模型名> | /model sub reset"
-                )
-                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-            if sub_lower in {"reset", "default"}:
-                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-            resolved, error = self._resolve_model_input(sub_arg, session)
-            if error:
-                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=error)
-            model_name = resolved or sub_arg
-            if model_name not in known_subtask:
-                known_subtask.append(model_name)
-            content = f"已切换子任务模型：{model_name}"
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-
         if arg_lower in {"list", "ls"}:
-            content = self._list_configured_models(
-            )
+            content = self._list_configured_models()
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
             content = (
                 "用法：/model list | /model <模型名> | /model reset\n"
-                "子任务：/model sub <模型名> | /model sub reset\n"
                 "清理历史：/model clean"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
@@ -1165,19 +1121,6 @@ class AgentLoop:
 
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    async def _delegate_tool_call(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        msg: InboundMessage,
-        origin_channel: str | None = None,
-        origin_chat_id: str | None = None,
-    ) -> str:
-        channel = origin_channel or msg.channel
-        chat_id = origin_chat_id or msg.chat_id
-        return f"已将 {tool_name} 交由子任务执行。"
-
-
     def _normalize_model_alias(self, model: str | None) -> str | None:
         if not model:
             return model
@@ -1227,7 +1170,6 @@ class AgentLoop:
         for candidate in [
             current_model,
             default_model,
-            current_subtask,
             *known_models,
         ]:
             if candidate and candidate not in merged:
@@ -1596,8 +1538,6 @@ class AgentLoop:
             ("/model list", "查看可用模型与当前模型"),
             ("/model <模型名>", "切换当前会话模型"),
             ("/model reset", "恢复默认模型"),
-            ("/model sub <模型名>", "设置子任务模型"),
-            ("/model sub reset", "恢复子任务默认模型"),
             ("/model clean", "清理模型历史"),
         ]
 
@@ -1724,16 +1664,6 @@ class AgentLoop:
             session = self.sessions.get_or_create(msg.session_key)
             current_model = self._get_session_model(session)
             return self._handle_model_command(forwarded, session, current_model)
-        if arg_lower.startswith("subtask "):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/subtask " + arg_raw[8:].strip(),
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            return self._handle_subtask_command(forwarded)
         if arg_lower.startswith("memu "):
             forwarded = InboundMessage(
                 channel=msg.channel,
@@ -1875,7 +1805,7 @@ class AgentLoop:
         tool_total_ms = 0
         tool_calls = 0
 
-        # Handle system messages (subagent announces)
+        # Handle system messages
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
@@ -1966,10 +1896,7 @@ class AgentLoop:
         if isinstance(exec_tool, ReadOnlyExecTool):
             exec_tool.set_context(msg.channel, msg.chat_id)
 
-        for name in ("write_file", "edit_file", "cron"):
-            delegate_tool = self.tools.get(name)
-            if isinstance(delegate_tool, DelegateTool):
-                delegate_tool.set_context(msg.channel, msg.chat_id)
+
         
         # Build initial messages (use get_history for LLM-formatted messages)
         memory_context = ""
@@ -2221,105 +2148,9 @@ class AgentLoop:
         return outbound
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
-        """
-        Process a system message (e.g., subagent announce).
-        
-        The chat_id field contains "original_channel:original_chat_id" to route
-        the response back to the correct destination.
-        """
+        """Process a system message."""
         logger.info(f"Processing system message from {msg.sender_id}")
-        # Reset per-turn spawn tracking for system messages too
-        
-        # Parse origin from chat_id (format: "channel:chat_id")
-        if ":" in msg.chat_id:
-            parts = msg.chat_id.split(":", 1)
-            origin_channel = parts[0]
-            origin_chat_id = parts[1]
-        else:
-            # Fallback
-            origin_channel = "cli"
-            origin_chat_id = msg.chat_id
-        
-        # Use the origin session for context
-        session_key = f"{origin_channel}:{origin_chat_id}"
-        session = self.sessions.get_or_create(session_key)
-        session_model = self._get_session_model(session)
-        self._current_session_model = session_model
-
-        info: dict[str, Any] | None = None
-        task_id = (msg.metadata or {}).get("task_id")
-        if task_id:
-            status = (msg.metadata or {}).get("status") or "ok"
-        
-        # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(origin_channel, origin_chat_id)
-        
-
-        exec_tool = self.tools.get("exec")
-        if isinstance(exec_tool, ReadOnlyExecTool):
-            exec_tool.set_context(origin_channel, origin_chat_id)
-        
-        # Fast-path failure/high-risk results without LLM
-        status = parsed.get("status")
-        if not status and (msg.metadata or {}).get("status") == "ok":
-            status = "成功"
-        if status in {"失败", "高风险拦截"}:
-            response_text = ""
-            if status == "高风险拦截" or "high_risk_command" in (msg.metadata or {}):
-                command = (msg.metadata or {}).get("high_risk_command") or ""
-                working_dir = (msg.metadata or {}).get("working_dir")
-                if command:
-                    record = self.confirmations.create(
-                        command=command,
-                        arguments={"command": command, "working_dir": working_dir},
-                        working_dir=working_dir or str(self.workspace),
-                    )
-                    response_text = (
-                        "子任务拦截了高风险命令，需要人工确认。\n"
-                        f"Command ID: {record.id}\n"
-                        f"请回复：确认 {record.id}\n"
-                        "提示：Command ID 仅一次有效，默认 5 分钟过期。"
-                    )
-                else:
-                    response_text = "子任务拦截了高风险命令，但未提供可执行命令。请补充具体命令。"
-            else:
-                error_cause = parsed.get("error_cause", "未知")
-                response_text = (
-                    f"子任务失败（错误归因：{error_cause}）。\n"
-                    "请确认下一步：修正需求/补充权限/允许重试。"
-                )
-
-            session = self.sessions.get_or_create(session_key)
-            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-            session.add_message("assistant", response_text)
-            self.sessions.save(session)
-
-            return OutboundMessage(
-                channel=origin_channel,
-                chat_id=origin_chat_id,
-                content=response_text,
-            )
-
-        if status == "成功":
-            label = (msg.metadata or {}).get("label") or (info or {}).get("label") or "subtask"
-            conclusion = parsed.get("conclusion") or "已完成"
-            evidence = parsed.get("evidence") or "无"
-            response_text = (
-                f"子任务完成：{label} (id: {task_id})\n"
-                f"结论：{conclusion}\n"
-                f"证据：{evidence}"
-            )
-            session = self.sessions.get_or_create(session_key)
-            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-            session.add_message("assistant", response_text)
-            self.sessions.save(session)
-            return OutboundMessage(
-                channel=origin_channel,
-                chat_id=origin_chat_id,
-                content=response_text,
-            )
+        return None
 
         # Build messages with the announce content
         memory_context = ""
