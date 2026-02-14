@@ -691,8 +691,32 @@ These are message commands you can send to the bot in chat channels:
 | `/version` | Show running package path + git version |
 
 Notes:
-- Web search uses Brave Search and requires `BRAVE_API_KEY` (or `tools.web.search.apiKey` in config).
+- Web search supports:
+  - Brave Search (`BRAVE_API_KEY` or `tools.web.search.apiKey`)
+  - MiniMax MCP search (`tools.mcp.minimax.apiKey`, or fallback to `providers.minimax.apiKey`)
+- Image understanding tool `understand_image` is enabled when MiniMax MCP is configured.
 - Weather queries (e.g. “北京天气”) use `wttr.in` directly and do not require an API key.
+
+MiniMax MCP config example:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "YOUR_MINIMAX_KEY",
+      "apiBase": "https://api.minimaxi.com/v1"
+    }
+  },
+  "tools": {
+    "mcp": {
+      "minimax": {
+        "enabled": true,
+        "apiHost": "https://api.minimax.chat"
+      }
+    }
+  }
+}
+```
 
 <details>
 <summary><b>Scheduled Tasks (Cron)</b></summary>

@@ -49,6 +49,22 @@ _GREETING_TOKENS = {
     "thankyou",
 }
 
+_DEEP_RECALL_PATTERNS = (
+    r"再想想",
+    r"再想一下",
+    r"再仔细想",
+    r"再回忆",
+    r"回忆一下",
+    r"再查一下记忆",
+    r"重新检索",
+    r"重新回忆",
+    r"想起来了吗",
+    r"think again",
+    r"recall again",
+    r"check memory again",
+    r"search memory again",
+)
+
 
 def _normalize_greeting(text: str) -> str:
     return re.sub(r"\s+", "", text.strip().lower())
@@ -112,6 +128,11 @@ class MemoryAdapter:
         self.workspace = workspace
         self.retrieve_top_k = retrieve_top_k
         self.retrieve_history_window = max(1, int(os.getenv("NANOBOT_MEMU_HISTORY_WINDOW", "4")))
+        self.retrieve_top_k_full = max(self.retrieve_top_k, int(os.getenv("NANOBOT_MEMU_RETRIEVE_TOP_K_FULL", "12")))
+        self.retrieve_history_window_full = max(
+            self.retrieve_history_window,
+            int(os.getenv("NANOBOT_MEMU_HISTORY_WINDOW_FULL", "12")),
+        )
         if memu_config is not None and not memu_config.enabled:
             enable_memory = False
         self.enable_memory = enable_memory
@@ -225,6 +246,8 @@ class MemoryAdapter:
         text = (message or "").strip()
         if not text:
             return True
+        if self.should_force_full_retrieve(text):
+            return False
         if _is_pure_emoji_or_punct(text):
             return True
         if _only_greeting_or_ack(text):
@@ -234,6 +257,12 @@ class MemoryAdapter:
             return True
         return False
 
+    def should_force_full_retrieve(self, message: str) -> bool:
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in _DEEP_RECALL_PATTERNS)
+
     async def retrieve_context(
         self,
         *,
@@ -242,6 +271,7 @@ class MemoryAdapter:
         sender_id: str | None,
         history: list[dict[str, Any]],
         current_message: str,
+        full_retrieve: bool = False,
     ) -> MemoryContext:
         if not self.enable_memory:
             return MemoryContext(text="")
@@ -250,8 +280,9 @@ class MemoryAdapter:
 
         user_id = self.build_user_id(channel, chat_id, sender_id)
 
+        history_window = self.retrieve_history_window_full if full_retrieve else self.retrieve_history_window
         queries: list[dict[str, Any]] = []
-        for msg in history[-self.retrieve_history_window:]:
+        for msg in history[-history_window:]:
             role = msg.get("role", "user")
             content = _extract_text(msg.get("content"))
             if not content:
@@ -262,11 +293,26 @@ class MemoryAdapter:
         if not queries:
             return MemoryContext(text="")
 
+        retrieve_cfg = getattr(self._memu, "retrieve_config", None)
+        item_cfg = getattr(retrieve_cfg, "item", None) if retrieve_cfg is not None else None
+        original_item_top_k = getattr(item_cfg, "top_k", None)
+        if full_retrieve and item_cfg is not None:
+            try:
+                item_cfg.top_k = self.retrieve_top_k_full
+            except Exception:
+                pass
+
         try:
             result = await self._memu.retrieve(queries=queries, where={"user_id": user_id})
         except Exception as exc:
             logger.warning(f"MemU retrieve failed: {exc}")
             return MemoryContext(text="")
+        finally:
+            if full_retrieve and item_cfg is not None and isinstance(original_item_top_k, int):
+                try:
+                    item_cfg.top_k = original_item_top_k
+                except Exception:
+                    pass
 
         return MemoryContext(text=self._format_context(result))
 

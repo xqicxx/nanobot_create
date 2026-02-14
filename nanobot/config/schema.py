@@ -259,6 +259,21 @@ class WebToolsConfig(BaseModel):
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
+class MiniMaxMCPConfig(BaseModel):
+    """MiniMax Coding Plan MCP-compatible API settings."""
+    enabled: bool = True
+    api_key: str = ""
+    api_host: str = "https://api.minimax.chat"
+    timeout_seconds: int = 15
+    enable_web_search: bool = True
+    enable_image_understanding: bool = True
+
+
+class MCPToolsConfig(BaseModel):
+    """MCP-backed tool configuration."""
+    minimax: MiniMaxMCPConfig = Field(default_factory=MiniMaxMCPConfig)
+
+
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
     timeout: int = 60
@@ -267,6 +282,7 @@ class ExecToolConfig(BaseModel):
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
+    mcp: MCPToolsConfig = Field(default_factory=MCPToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 

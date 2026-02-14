@@ -22,7 +22,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, ListDirTool, WriteFileTool, EditFileTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.readonly_exec import ReadOnlyExecTool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+from nanobot.agent.tools.web import WebSearchTool, WebFetchTool, UnderstandImageTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.delegate import DelegateTool
@@ -159,6 +159,8 @@ class AgentLoop:
         subtask_timeout: int | None = None,
         max_iterations: int = 20,
         brave_api_key: str | None = None,
+        minimax_mcp_config: Any | None = None,
+        minimax_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
@@ -181,6 +183,8 @@ class AgentLoop:
         self.subtask_timeout = subtask_timeout
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
+        self.minimax_mcp_config = minimax_mcp_config
+        self.minimax_api_key = minimax_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
@@ -188,9 +192,9 @@ class AgentLoop:
         stream_channels = getattr(stream_config, "channels", []) if stream_config is not None else []
         self.stream_channels = {c for c in stream_channels if isinstance(c, str)}
         try:
-            self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "0.8")))
+            self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "1.2")))
         except Exception:
-            self.memu_retrieve_timeout_sec = 0.8
+            self.memu_retrieve_timeout_sec = 1.2
         
         self.context = ContextBuilder(workspace)
         memu_enabled = True
@@ -226,6 +230,8 @@ class AgentLoop:
             model=self.subtask_model or self.model,
             timeout_seconds=self.subtask_timeout,
             brave_api_key=brave_api_key,
+            minimax_mcp_config=minimax_mcp_config,
+            minimax_api_key=minimax_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             cron_service=self.cron_service,
@@ -304,9 +310,30 @@ class AgentLoop:
             spawn_cb=self._spawn_subtask,
         ))
         
+        # MiniMax MCP-backed tools
+        mcp_cfg = self.minimax_mcp_config
+        minimax_mcp_enabled = bool(getattr(mcp_cfg, "enabled", False)) if mcp_cfg is not None else False
+        minimax_mcp_key = (getattr(mcp_cfg, "api_key", "") or self.minimax_api_key or "").strip() if mcp_cfg is not None else (self.minimax_api_key or "").strip()
+        minimax_mcp_host = getattr(mcp_cfg, "api_host", "https://api.minimax.chat") if mcp_cfg is not None else "https://api.minimax.chat"
+        minimax_mcp_timeout = float(getattr(mcp_cfg, "timeout_seconds", 15)) if mcp_cfg is not None else 15.0
+        minimax_web_enabled = bool(getattr(mcp_cfg, "enable_web_search", True)) if mcp_cfg is not None else True
+        minimax_image_enabled = bool(getattr(mcp_cfg, "enable_image_understanding", True)) if mcp_cfg is not None else True
+
         # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+        self.tools.register(WebSearchTool(
+            api_key=self.brave_api_key,
+            minimax_enabled=minimax_mcp_enabled and minimax_web_enabled,
+            minimax_api_key=minimax_mcp_key,
+            minimax_api_host=minimax_mcp_host,
+            minimax_timeout=minimax_mcp_timeout,
+        ))
         self.tools.register(WebFetchTool())
+        if minimax_mcp_enabled and minimax_image_enabled and minimax_mcp_key:
+            self.tools.register(UnderstandImageTool(
+                minimax_api_key=minimax_mcp_key,
+                minimax_api_host=minimax_mcp_host,
+                timeout=minimax_mcp_timeout,
+            ))
         
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
@@ -1306,6 +1333,79 @@ class AgentLoop:
         cleaned = cleaned.strip(" ,，。?？!！")
         return cleaned.strip()
 
+    def _is_supported_image_source(self, source: str, media_type: str | None) -> bool:
+        if not source:
+            return False
+        if media_type and media_type not in {"image", "photo", "sticker"}:
+            return False
+        lowered = source.lower()
+        if lowered.startswith(("http://", "https://", "data:image/")):
+            return True
+        return Path(source).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+
+    def _collect_image_sources(self, msg: InboundMessage) -> list[str]:
+        media_type = str((msg.metadata or {}).get("media_type", "")).lower() or None
+        images: list[str] = []
+        for src in msg.media or []:
+            if isinstance(src, str) and self._is_supported_image_source(src, media_type):
+                images.append(src)
+        return images[:2]
+
+    def _build_image_analysis_prompt(self, user_text: str) -> str:
+        text = (user_text or "").strip()
+        if text:
+            return f"请根据图片回答用户问题：{text}"
+        return "请描述图片主要内容，提取关键实体和可见文字。"
+
+    async def _prepare_multimodal_content(
+        self,
+        msg: InboundMessage,
+    ) -> tuple[str, list[str] | None]:
+        images = self._collect_image_sources(msg)
+        if not images:
+            return msg.content, msg.media if msg.media else None
+
+        tool = self.tools.get("understand_image")
+        if not isinstance(tool, UnderstandImageTool) or not tool.is_configured():
+            return msg.content, msg.media if msg.media else None
+
+        prompt = self._build_image_analysis_prompt(msg.content or "")
+        analyses: list[str] = []
+        for idx, image_src in enumerate(images, start=1):
+            result = await self.tools.execute(
+                "understand_image",
+                {"prompt": prompt, "image_source": image_src},
+            )
+            if isinstance(result, str) and result.startswith("Error:"):
+                logger.warning(
+                    "understand_image failed (channel={}, sender={}, source={}): {}",
+                    msg.channel,
+                    msg.sender_id,
+                    image_src,
+                    result,
+                )
+                continue
+            analyses.append(f"[Image {idx}]\n{result}")
+
+        if not analyses:
+            return msg.content, msg.media if msg.media else None
+
+        base_text = (msg.content or "").strip()
+        merged_analysis = "\n\n".join(analyses)
+        if base_text:
+            enriched = f"{base_text}\n\n[图像解析结果]\n{merged_analysis}"
+        else:
+            enriched = f"[图像解析结果]\n{merged_analysis}"
+
+        logger.info(
+            "Prepared multimodal context from {} image(s) (channel={}, sender={})",
+            len(analyses),
+            msg.channel,
+            msg.sender_id,
+        )
+        # Once we have textual analysis, avoid passing raw image blobs to text-only models.
+        return enriched, None
+
     async def _handle_weather(self, msg: InboundMessage) -> OutboundMessage | None:
         if not self._is_weather_intent(msg.content or ""):
             return None
@@ -1737,43 +1837,65 @@ class AgentLoop:
         if msg.channel != "system":
             try:
                 memu_start = time.perf_counter()
+                full_retrieve = self.memory_adapter.should_force_full_retrieve(msg.content or "")
+                retrieve_timeout_sec = self.memu_retrieve_timeout_sec
+                if full_retrieve:
+                    try:
+                        retrieve_timeout_sec = max(
+                            retrieve_timeout_sec,
+                            float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC_FULL", "3.0")),
+                        )
+                    except Exception:
+                        retrieve_timeout_sec = max(retrieve_timeout_sec, 3.0)
                 retrieve_coro = self.memory_adapter.retrieve_context(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     sender_id=msg.sender_id,
                     history=session.get_history(),
                     current_message=msg.content,
+                    full_retrieve=full_retrieve,
                 )
-                if self.memu_retrieve_timeout_sec > 0:
-                    mem_ctx = await asyncio.wait_for(retrieve_coro, timeout=self.memu_retrieve_timeout_sec)
+                if retrieve_timeout_sec > 0:
+                    mem_ctx = await asyncio.wait_for(retrieve_coro, timeout=retrieve_timeout_sec)
                 else:
                     mem_ctx = await retrieve_coro
                 memory_context = mem_ctx.text
                 memu_retrieve_ms = int(round((time.perf_counter() - memu_start) * 1000))
                 logger.info(
-                    "MemU retrieve in {}ms (channel={}, sender={}, history_len={}, msg_len={})",
+                    "MemU retrieve in {}ms (channel={}, sender={}, history_len={}, msg_len={}, full_retrieve={}, timeout={}ms)",
                     memu_retrieve_ms,
                     msg.channel,
                     msg.sender_id,
                     len(session.get_history()),
                     len(msg.content or ""),
+                    full_retrieve,
+                    int(round(retrieve_timeout_sec * 1000)),
                 )
             except asyncio.TimeoutError:
                 memu_retrieve_ms = int(round((time.perf_counter() - memu_start) * 1000))
                 logger.warning(
-                    "MemU retrieve timed out in {}ms (timeout={}ms, channel={}, sender={})",
+                    "MemU retrieve timed out in {}ms (timeout={}ms, channel={}, sender={}, full_retrieve={})",
                     memu_retrieve_ms,
-                    int(round(self.memu_retrieve_timeout_sec * 1000)),
+                    int(round(retrieve_timeout_sec * 1000)),
                     msg.channel,
                     msg.sender_id,
+                    full_retrieve,
                 )
             except Exception as exc:
                 logger.warning(f"MemU context fetch failed: {exc}")
 
+        effective_content = msg.content
+        effective_media = msg.media if msg.media else None
+        if msg.channel != "system":
+            try:
+                effective_content, effective_media = await self._prepare_multimodal_content(msg)
+            except Exception as exc:
+                logger.warning(f"Multimodal pre-analysis failed: {exc}")
+
         messages = self.context.build_messages(
             history=session.get_history(),
-            current_message=msg.content,
-            media=msg.media if msg.media else None,
+            current_message=effective_content,
+            media=effective_media,
             channel=msg.channel,
             chat_id=msg.chat_id,
             memory_context=memory_context,
@@ -1876,8 +1998,12 @@ class AgentLoop:
                     break
 
                 if self._should_force_web_search(msg):
-                    if not self.brave_api_key:
-                        final_content = "搜索未配置：请设置 BRAVE_API_KEY 或 config.tools.web.search.apiKey。"
+                    search_tool = self.tools.get("web_search")
+                    if isinstance(search_tool, WebSearchTool) and not search_tool.is_configured():
+                        final_content = (
+                            "搜索未配置：请设置 BRAVE_API_KEY / config.tools.web.search.apiKey，"
+                            "或配置 MiniMax MCP（tools.mcp.minimax.apiKey / providers.minimax.apiKey）。"
+                        )
                         break
                     result = await self.tools.execute(
                         "web_search",

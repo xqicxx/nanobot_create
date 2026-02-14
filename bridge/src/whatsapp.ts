@@ -9,9 +9,13 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  downloadMediaMessage,
 } from '@whiskeysockets/baileys';
 
 import { Boom } from '@hapi/boom';
+import { mkdir, writeFile } from 'fs/promises';
+import { homedir } from 'os';
+import { join } from 'path';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 
@@ -28,6 +32,8 @@ export interface InboundMessage {
   content: string;
   timestamp: number;
   isGroup: boolean;
+  mediaPath?: string;
+  mediaType?: 'image' | 'video' | 'document' | 'audio';
 }
 
 export interface WhatsAppClientOptions {
@@ -43,9 +49,12 @@ export class WhatsAppClient {
   private reconnecting = false;
   private presenceInterval: NodeJS.Timeout | null = null;
   private jidMap: Map<string, string> = new Map();
+  private readonly mediaDir: string;
+  private readonly mediaLogger = pino({ level: 'silent' });
 
   constructor(options: WhatsAppClientOptions) {
     this.options = options;
+    this.mediaDir = process.env.WA_MEDIA_DIR || join(homedir(), '.nanobot', 'media', 'whatsapp');
   }
 
   private rememberJidPair(primary: unknown, alt: unknown): void {
@@ -210,8 +219,8 @@ export class WhatsAppClient {
         await this.sendPresenceAvailable(presenceJid);
         await this.maybeAutoRead(msg);
 
-        const content = this.extractMessageContent(msg);
-        if (!content) continue;
+        const parsed = await this.extractIncomingMessage(msg);
+        if (!parsed.content) continue;
 
         const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
 
@@ -219,49 +228,136 @@ export class WhatsAppClient {
           id: msg.key.id || '',
           sender: msg.key.remoteJid || '',
           pn: msg.key.remoteJidAlt || '',
-          content,
+          content: parsed.content,
           timestamp: msg.messageTimestamp as number,
           isGroup,
+          mediaPath: parsed.mediaPath,
+          mediaType: parsed.mediaType,
         });
       }
     });
   }
 
-  private extractMessageContent(msg: any): string | null {
+  private async extractIncomingMessage(msg: any): Promise<{
+    content: string | null;
+    mediaPath?: string;
+    mediaType?: 'image' | 'video' | 'document' | 'audio';
+  }> {
     const message = msg.message;
-    if (!message) return null;
+    if (!message) return { content: null };
 
     // Text message
     if (message.conversation) {
-      return message.conversation;
+      return { content: message.conversation };
     }
 
     // Extended text (reply, link preview)
     if (message.extendedTextMessage?.text) {
-      return message.extendedTextMessage.text;
+      return { content: message.extendedTextMessage.text };
     }
 
-    // Image with caption
-    if (message.imageMessage?.caption) {
-      return `[Image] ${message.imageMessage.caption}`;
+    if (message.imageMessage) {
+      const mediaPath = await this.saveMediaMessage(msg, 'image', message.imageMessage.mimetype);
+      const caption = message.imageMessage.caption?.trim();
+      return {
+        content: this.formatMediaContent('Image', mediaPath, caption),
+        mediaPath: mediaPath || undefined,
+        mediaType: mediaPath ? 'image' : undefined,
+      };
     }
 
-    // Video with caption
-    if (message.videoMessage?.caption) {
-      return `[Video] ${message.videoMessage.caption}`;
+    if (message.videoMessage) {
+      const mediaPath = await this.saveMediaMessage(msg, 'video', message.videoMessage.mimetype);
+      const caption = message.videoMessage.caption?.trim();
+      return {
+        content: this.formatMediaContent('Video', mediaPath, caption),
+        mediaPath: mediaPath || undefined,
+        mediaType: mediaPath ? 'video' : undefined,
+      };
     }
 
-    // Document with caption
-    if (message.documentMessage?.caption) {
-      return `[Document] ${message.documentMessage.caption}`;
+    if (message.documentMessage) {
+      const mediaPath = await this.saveMediaMessage(msg, 'document', message.documentMessage.mimetype);
+      const caption = message.documentMessage.caption?.trim() || message.documentMessage.fileName;
+      return {
+        content: this.formatMediaContent('Document', mediaPath, caption),
+        mediaPath: mediaPath || undefined,
+        mediaType: mediaPath ? 'document' : undefined,
+      };
     }
 
-    // Voice/Audio message
     if (message.audioMessage) {
-      return `[Voice Message]`;
+      const mediaPath = await this.saveMediaMessage(msg, 'audio', message.audioMessage.mimetype);
+      const label = message.audioMessage.ptt ? 'Voice Message' : 'Audio';
+      return {
+        content: this.formatMediaContent(label, mediaPath),
+        mediaPath: mediaPath || undefined,
+        mediaType: mediaPath ? 'audio' : undefined,
+      };
     }
 
-    return null;
+    return { content: null };
+  }
+
+  private formatMediaContent(kind: string, mediaPath: string | null, caption?: string): string {
+    const prefix = mediaPath ? `[${kind}: ${mediaPath}]` : `[${kind}]`;
+    return caption ? `${prefix} ${caption}` : prefix;
+  }
+
+  private async saveMediaMessage(
+    msg: any,
+    mediaType: 'image' | 'video' | 'document' | 'audio',
+    mimeType?: string,
+  ): Promise<string | null> {
+    if (!this.sock) return null;
+    try {
+      const raw = await downloadMediaMessage(
+        msg,
+        'buffer',
+        {},
+        {
+          logger: this.mediaLogger,
+          reuploadRequest: this.sock.updateMediaMessage,
+        },
+      );
+      if (!raw) return null;
+      const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+      const maxSizeBytes = 12 * 1024 * 1024;
+      if (buffer.length > maxSizeBytes) {
+        if (WA_DEBUG) console.error(`media too large (${buffer.length} bytes), skip save`);
+        return null;
+      }
+      await mkdir(this.mediaDir, { recursive: true });
+      const ext = this.extensionForMime(mimeType, mediaType);
+      const rawId = String(msg?.key?.id || Date.now());
+      const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filePath = join(this.mediaDir, `${safeId}_${Date.now()}${ext}`);
+      await writeFile(filePath, buffer);
+      return filePath;
+    } catch (err) {
+      if (WA_DEBUG) console.error('saveMediaMessage failed:', err);
+      return null;
+    }
+  }
+
+  private extensionForMime(mimeType: string | undefined, mediaType: 'image' | 'video' | 'document' | 'audio'): string {
+    const mime = (mimeType || '').toLowerCase();
+    if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+    if (mime.includes('png')) return '.png';
+    if (mime.includes('webp')) return '.webp';
+    if (mime.includes('gif')) return '.gif';
+    if (mime.includes('mp4')) return '.mp4';
+    if (mime.includes('mpeg')) return '.mp3';
+    if (mime.includes('ogg')) return '.ogg';
+    if (mime.includes('wav')) return '.wav';
+    if (mime.includes('pdf')) return '.pdf';
+    if (mime.includes('zip')) return '.zip';
+    if (mime.includes('json')) return '.json';
+
+    if (mediaType === 'image') return '.jpg';
+    if (mediaType === 'video') return '.mp4';
+    if (mediaType === 'audio') return '.ogg';
+    return '.bin';
   }
 
   async sendMessage(to: string, text: string): Promise<void> {

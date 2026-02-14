@@ -1,9 +1,12 @@
-"""Web tools: web_search and web_fetch."""
+"""Web tools: web_search, web_fetch, understand_image."""
 
+import base64
 import html
 import json
+import mimetypes
 import os
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,6 +17,9 @@ from nanobot.agent.tools.base import Tool
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
+DEFAULT_MINIMAX_MCP_HOST = "https://api.minimax.chat"
+DEFAULT_MINIMAX_TIMEOUT = 15.0
+MAX_IMAGE_SOURCE_BYTES = 10 * 1024 * 1024  # 10MB
 
 
 def _strip_tags(text: str) -> str:
@@ -43,8 +49,94 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+class _MiniMaxMCPClient:
+    """Lightweight client for MiniMax Coding Plan MCP APIs."""
+
+    def __init__(self, api_key: str, api_host: str, timeout: float = DEFAULT_MINIMAX_TIMEOUT):
+        self.api_key = api_key.strip()
+        self.api_host = api_host.rstrip("/")
+        self.timeout = timeout
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key and self.api_host)
+
+    async def search(self, query: str) -> dict[str, Any]:
+        payload = {"q": query}
+        return await self._post_json("/v1/coding_plan/search", payload)
+
+    async def understand_image(self, prompt: str, image_source: str) -> dict[str, Any]:
+        image_url = await self._to_data_url(image_source)
+        payload = {"prompt": prompt, "image_url": image_url}
+        return await self._post_json("/v1/coding_plan/vlm", payload)
+
+    async def _post_json(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled:
+            raise RuntimeError("MiniMax MCP is not configured")
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "MM-API-Source": "Minimax-MCP",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(f"{self.api_host}{endpoint}", headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        base_resp = data.get("base_resp") if isinstance(data, dict) else None
+        if isinstance(base_resp, dict):
+            status_code = base_resp.get("status_code")
+            if status_code not in (None, 0):
+                status_msg = base_resp.get("status_msg", "unknown")
+                raise RuntimeError(f"MiniMax MCP API error: {status_code} - {status_msg}")
+        return data
+
+    async def _to_data_url(self, image_source: str) -> str:
+        source = (image_source or "").strip()
+        if not source:
+            raise RuntimeError("image_source is required")
+        if source.startswith("@"):
+            source = source[1:]
+        if source.startswith("data:"):
+            return source
+
+        if source.startswith(("http://", "https://")):
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(source)
+                response.raise_for_status()
+                image_bytes = response.content
+                if len(image_bytes) > MAX_IMAGE_SOURCE_BYTES:
+                    raise RuntimeError("image_source is too large (>10MB)")
+                mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+                    # API supports jpg/png/webp. Fall back to jpeg if unknown.
+                    mime = "image/jpeg"
+            b64 = base64.b64encode(image_bytes).decode("utf-8")
+            return f"data:{mime};base64,{b64}"
+
+        path = Path(source).expanduser()
+        if not path.exists() or not path.is_file():
+            raise RuntimeError(f"image file not found: {source}")
+        image_bytes = path.read_bytes()
+        if len(image_bytes) > MAX_IMAGE_SOURCE_BYTES:
+            raise RuntimeError("image_source is too large (>10MB)")
+        mime, _ = mimetypes.guess_type(str(path))
+        mime = (mime or "image/jpeg").lower()
+        if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+            ext = path.suffix.lower()
+            if ext == ".png":
+                mime = "image/png"
+            elif ext == ".webp":
+                mime = "image/webp"
+            else:
+                mime = "image/jpeg"
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
+
+
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using Brave or MiniMax MCP search API."""
     
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -57,35 +149,125 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
     
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 5,
+        *,
+        minimax_enabled: bool = False,
+        minimax_api_key: str | None = None,
+        minimax_api_host: str | None = None,
+        minimax_timeout: float = DEFAULT_MINIMAX_TIMEOUT,
+    ):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
+        resolved_minimax_key = minimax_api_key or os.environ.get("MINIMAX_API_KEY", "")
+        host = (minimax_api_host or DEFAULT_MINIMAX_MCP_HOST).strip() or DEFAULT_MINIMAX_MCP_HOST
+        self._minimax = _MiniMaxMCPClient(
+            api_key=resolved_minimax_key,
+            api_host=host,
+            timeout=minimax_timeout,
+        ) if minimax_enabled else None
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key) or bool(self._minimax and self._minimax.enabled)
     
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return "Error: BRAVE_API_KEY not configured"
-        
         try:
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0
-                )
-                r.raise_for_status()
-            
-            results = r.json().get("web", {}).get("results", [])
-            if not results:
-                return f"No results for: {query}"
-            
-            lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
-                lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
-                    lines.append(f"   {desc}")
-            return "\n".join(lines)
+            if self._minimax and self._minimax.enabled:
+                data = await self._minimax.search(query)
+                return self._format_minimax_results(query, data, n)
+
+            if self.api_key:
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        params={"q": query, "count": n},
+                        headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                        timeout=10.0
+                    )
+                    r.raise_for_status()
+                return self._format_brave_results(query, r.json(), n)
+
+            return "Error: web search not configured (set BRAVE_API_KEY or MiniMax MCP key)"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @staticmethod
+    def _format_brave_results(query: str, data: dict[str, Any], n: int) -> str:
+        results = data.get("web", {}).get("results", [])
+        if not results:
+            return f"No results for: {query}"
+
+        lines = [f"Results for: {query}\n"]
+        for i, item in enumerate(results[:n], 1):
+            lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+            if desc := item.get("description"):
+                lines.append(f"   {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_minimax_results(query: str, data: dict[str, Any], n: int) -> str:
+        results = data.get("organic", [])
+        if not results:
+            return f"No results for: {query}"
+
+        lines = [f"Results for: {query}\n"]
+        for i, item in enumerate(results[:n], 1):
+            title = item.get("title", "")
+            url = item.get("link", "")
+            snippet = item.get("snippet", "")
+            date = item.get("date", "")
+            lines.append(f"{i}. {title}\n   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+            if date:
+                lines.append(f"   Date: {date}")
+        return "\n".join(lines)
+
+
+class UnderstandImageTool(Tool):
+    """Understand an image via MiniMax Coding Plan VLM API."""
+
+    name = "understand_image"
+    description = "Analyze an image (local path, URL, or data URL) with a prompt."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "Instruction for image analysis"},
+            "image_source": {"type": "string", "description": "Local file path, http(s) URL, or data URL"},
+        },
+        "required": ["prompt", "image_source"],
+    }
+
+    def __init__(
+        self,
+        *,
+        minimax_api_key: str | None = None,
+        minimax_api_host: str | None = None,
+        timeout: float = DEFAULT_MINIMAX_TIMEOUT,
+    ):
+        key = minimax_api_key or os.environ.get("MINIMAX_API_KEY", "")
+        host = (minimax_api_host or DEFAULT_MINIMAX_MCP_HOST).strip() or DEFAULT_MINIMAX_MCP_HOST
+        self._minimax = _MiniMaxMCPClient(
+            api_key=key,
+            api_host=host,
+            timeout=timeout,
+        )
+
+    def is_configured(self) -> bool:
+        return self._minimax.enabled
+
+    async def execute(self, prompt: str, image_source: str, **kwargs: Any) -> str:
+        if not self._minimax.enabled:
+            return "Error: understand_image is not configured (set MiniMax MCP key)"
+        try:
+            data = await self._minimax.understand_image(prompt=prompt, image_source=image_source)
+            content = data.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            return json.dumps(data, ensure_ascii=False, indent=2)
         except Exception as e:
             return f"Error: {e}"
 

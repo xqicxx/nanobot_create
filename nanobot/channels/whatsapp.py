@@ -140,6 +140,7 @@ class WhatsAppChannel(BaseChannel):
             # New LID sytle typically: 
             sender = data.get("sender", "")
             content = data.get("content", "")
+            media_path = data.get("mediaPath", "")
             message_id = data.get("id")
 
             if message_id:
@@ -161,15 +162,21 @@ class WhatsAppChannel(BaseChannel):
             if content == "[Voice Message]":
                 logger.info(f"Voice message received from {sender_id}, but direct download from bridge is not yet supported.")
                 content = "[Voice Message: Transcription not available for WhatsApp yet]"
+
+            media: list[str] = []
+            if isinstance(media_path, str) and media_path.strip():
+                media.append(media_path.strip())
             
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=user_id,
                 content=content,
+                media=media,
                 metadata={
                     "message_id": message_id,
                     "timestamp": data.get("timestamp"),
-                    "is_group": data.get("isGroup", False)
+                    "is_group": data.get("isGroup", False),
+                    "media_type": data.get("mediaType"),
                 }
             )
         
