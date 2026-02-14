@@ -211,24 +211,53 @@ class WebSearchTool(Tool):
 
     def is_configured(self) -> bool:
         return bool(self.api_key) or bool(self._minimax and self._minimax.enabled)
-    
+
+    async def _search_brave(self, query: str, n: int) -> str:
+        if not self.api_key:
+            raise RuntimeError("Brave search not configured (set BRAVE_API_KEY)")
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": n},
+                headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                timeout=10.0
+            )
+            r.raise_for_status()
+        return self._format_brave_results(query, r.json(), n)
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         try:
             n = min(max(count or self.max_results, 1), 10)
+            minimax_error: str | None = None
+
             if self._minimax and self._minimax.enabled:
-                data = await self._minimax.search(query)
-                return self._format_minimax_results(query, data, n)
+                try:
+                    data = await self._minimax.search(query)
+                    return self._format_minimax_results(query, data, n)
+                except Exception as exc:
+                    minimax_error = str(exc) or repr(exc)
+
+            if minimax_error:
+                if self.api_key:
+                    try:
+                        brave_result = await self._search_brave(query, n)
+                        return (
+                            f"MiniMax 搜索失败：{minimax_error}\n"
+                            "已自动回退到 Brave 搜索。\n\n"
+                            f"{brave_result}"
+                        )
+                    except Exception as brave_exc:
+                        return (
+                            f"MiniMax 搜索失败：{minimax_error}\n"
+                            f"Brave 回退也失败：{brave_exc}"
+                        )
+                return (
+                    f"MiniMax 搜索失败：{minimax_error}\n"
+                    "Brave 未配置：请设置 BRAVE_API_KEY。"
+                )
 
             if self.api_key:
-                async with httpx.AsyncClient() as client:
-                    r = await client.get(
-                        "https://api.search.brave.com/res/v1/web/search",
-                        params={"q": query, "count": n},
-                        headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                        timeout=10.0
-                    )
-                    r.raise_for_status()
-                return self._format_brave_results(query, r.json(), n)
+                return await self._search_brave(query, n)
 
             return "Error: web search not configured (set BRAVE_API_KEY or MiniMax MCP key)"
         except Exception as e:
