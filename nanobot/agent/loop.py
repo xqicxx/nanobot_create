@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 import re
 from pathlib import Path
@@ -1327,8 +1328,27 @@ class AgentLoop:
         if not raw.startswith("/menu"):
             return None
         parts = raw.split(None, 1)
-        arg = parts[1].strip().lower() if len(parts) > 1 else "list"
-        if arg in {"categories", "cats", "cat"}:
+        arg_raw = parts[1].strip() if len(parts) > 1 else "list"
+        arg_lower = arg_raw.lower()
+        if arg_lower.startswith("restart"):
+            restart_parts = arg_raw.split(None, 1)
+            restart_flag = restart_parts[1].strip().lower() if len(restart_parts) > 1 else ""
+            if restart_flag not in {"now", "confirm", "yes", "ok", "确认"}:
+                content = (
+                    "将重启当前 nanobot 进程（适用于 systemd 托管）。\n"
+                    "用法：/menu restart now"
+                )
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            if not self._is_systemd_managed():
+                content = (
+                    "当前进程未检测到 systemd 托管，已取消自动重启。\n"
+                    "请手动执行：sudo systemctl restart nanobot-agent@root"
+                )
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+            self._schedule_self_restart(delay=1.2)
+            content = "收到，正在重启 nanobot 进程（约 3-8 秒恢复）。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        if arg_lower in {"categories", "cats", "cat"}:
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
@@ -1338,7 +1358,7 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
-        if arg in {"all", "full"}:
+        if arg_lower in {"all", "full"}:
             categories = self.memory_adapter.list_category_config()
             lines = [
                 "全部命令（原始 + /menu 路由）：",
@@ -1356,6 +1376,7 @@ class AgentLoop:
                 "/menu category ...",
                 "/menu categories",
                 "/menu subtask ...",
+                "/menu restart now",
                 "/menu version",
             ]
             if categories:
@@ -1366,59 +1387,59 @@ class AgentLoop:
                     desc = cat.get("description", "")
                     lines.append(f"{idx}. {name} - {desc}" if desc else f"{idx}. {name}")
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
-        if arg.startswith("model "):
+        if arg_lower.startswith("model "):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
-                content="/model " + arg[6:],
+                content="/model " + arg_raw[6:].strip(),
                 media=msg.media,
                 metadata=msg.metadata,
             )
             session = self.sessions.get_or_create(msg.session_key)
             current_model = self._get_session_model(session)
             return self._handle_model_command(forwarded, session, current_model)
-        if arg.startswith("subtask "):
+        if arg_lower.startswith("subtask "):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
-                content="/subtask " + arg[8:],
+                content="/subtask " + arg_raw[8:].strip(),
                 media=msg.media,
                 metadata=msg.metadata,
             )
             return self._handle_subtask_command(forwarded)
-        if arg.startswith("memu "):
+        if arg_lower.startswith("memu "):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
-                content="/memu " + arg[5:],
+                content="/memu " + arg_raw[5:].strip(),
                 media=msg.media,
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
-        if arg.startswith("status"):
+        if arg_lower.startswith("status"):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
-                content="/memu " + arg,
+                content="/memu " + arg_raw,
                 media=msg.media,
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
-        if arg.startswith("category"):
+        if arg_lower.startswith("category"):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
                 chat_id=msg.chat_id,
-                content="/memu " + arg,
+                content="/memu " + arg_raw,
                 media=msg.media,
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
-        if arg in {"version", "ver"}:
+        if arg_lower in {"version", "ver"}:
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
@@ -1428,8 +1449,8 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return self._handle_version_command(forwarded)
-        if arg not in {"list", "ls", "help", "?"}:
-            arg = "list"
+        if arg_lower not in {"list", "ls", "help", "?"}:
+            arg_lower = "list"
         lines = [
             "可用 /menu 子命令：",
             "/menu list",
@@ -1442,9 +1463,25 @@ class AgentLoop:
             "/menu category update <名称> | <新描述> | /menu category delete <名称>",
             "/menu categories (显示所有分类与描述)",
             "/menu subtask run [-m <模型>] <任务> | /menu subtask list | /menu subtask recent | /menu subtask <id> | /menu subtask clear",
+            "/menu restart now",
             "/menu version",
         ]
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
+
+    def _is_systemd_managed(self) -> bool:
+        # systemd usually injects one of these env vars for managed services.
+        return bool(
+            os.getenv("INVOCATION_ID")
+            or os.getenv("JOURNAL_STREAM")
+            or os.getenv("SYSTEMD_EXEC_PID")
+        )
+
+    def _schedule_self_restart(self, *, delay: float = 1.0) -> None:
+        def _restart_now() -> None:
+            logger.warning("Restart requested via /menu restart; exiting with code 1 for supervisor restart.")
+            os._exit(1)
+
+        asyncio.get_running_loop().call_later(delay, _restart_now)
     
     async def _process_message(
         self,
@@ -1452,6 +1489,10 @@ class AgentLoop:
         stream_callback: Any | None = None,
     ) -> OutboundMessage | None:
         start = time.perf_counter()
+        ingress_wait_ms: int | None = None
+        raw_ingress = (msg.metadata or {}).get("_nb_ingress_perf")
+        if isinstance(raw_ingress, (int, float)):
+            ingress_wait_ms = int(round((start - float(raw_ingress)) * 1000))
         response = await self._process_message_impl(msg, stream_callback=stream_callback)
         elapsed_ms = (time.perf_counter() - start) * 1000
         try:
@@ -1459,12 +1500,13 @@ class AgentLoop:
         except Exception:
             content_len = -1
         logger.info(
-            "Message processed in {}ms (channel={}, sender={}, len={}, response={})",
+            "Message processed in {}ms (channel={}, sender={}, len={}, response={}, ingress_wait={}ms)",
             int(round(elapsed_ms)),
             msg.channel,
             msg.sender_id,
             content_len,
             "yes" if response else "no",
+            ingress_wait_ms if ingress_wait_ms is not None else -1,
         )
         return response
 
@@ -1482,6 +1524,11 @@ class AgentLoop:
         Returns:
             The response message, or None if no response needed.
         """
+        impl_start = time.perf_counter()
+        llm_total_ms = 0
+        tool_total_ms = 0
+        tool_calls = 0
+
         # Handle system messages (subagent announces)
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
@@ -1704,6 +1751,7 @@ class AgentLoop:
                     on_token=stream_callback if use_stream else None,
                 )
                 llm_elapsed_ms = int(round((time.perf_counter() - llm_start) * 1000))
+                llm_total_ms += llm_elapsed_ms
                 logger.info(
                     "LLM response in {}ms (channel={}, sender={}, model={}, iter={})",
                     llm_elapsed_ms,
@@ -1734,8 +1782,10 @@ class AgentLoop:
                     
                     # Execute tools
                     for tool_call in response.tool_calls:
+                        tool_calls += 1
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                        tool_start = time.perf_counter()
                         if tool_call.name == "spawn":
                             task = tool_call.arguments.get("task", "")
                             label = tool_call.arguments.get("label")
@@ -1745,6 +1795,15 @@ class AgentLoop:
                                 result = await self.tools.execute(tool_call.name, tool_call.arguments)
                         else:
                             result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        tool_elapsed_ms = int(round((time.perf_counter() - tool_start) * 1000))
+                        tool_total_ms += tool_elapsed_ms
+                        logger.info(
+                            "Tool {} done in {}ms (channel={}, sender={})",
+                            tool_call.name,
+                            tool_elapsed_ms,
+                            msg.channel,
+                            msg.sender_id,
+                        )
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
                         )
@@ -1804,6 +1863,16 @@ class AgentLoop:
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+        impl_elapsed_ms = int(round((time.perf_counter() - impl_start) * 1000))
+        logger.info(
+            "Stage summary: total={}ms, memu_retrieve={}ms, llm_total={}ms, tool_total={}ms, iterations={}, tool_calls={}",
+            impl_elapsed_ms,
+            memu_retrieve_ms if memu_retrieve_ms is not None else -1,
+            llm_total_ms,
+            tool_total_ms,
+            iteration,
+            tool_calls,
+        )
         
         # Save to session
         session.add_message("user", msg.content)
@@ -1816,8 +1885,9 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+            metadata=dict(msg.metadata or {}),  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
+        outbound.metadata["_nb_response_ready_perf"] = time.perf_counter()
 
         # Persist memory via MemU (skip system messages and low-signal content)
         if msg.channel != "system":

@@ -1,6 +1,7 @@
 """Base channel interface for chat platforms."""
 
 from abc import ABC, abstractmethod
+import time
 from typing import Any
 
 from loguru import logger
@@ -109,6 +110,9 @@ class BaseChannel(ABC):
                 f"Add them to allowFrom list in config to grant access."
             )
             return
+
+        msg_metadata = dict(metadata or {})
+        msg_metadata.setdefault("_nb_ingress_perf", time.perf_counter())
         
         msg = InboundMessage(
             channel=self.name,
@@ -116,7 +120,7 @@ class BaseChannel(ABC):
             chat_id=str(chat_id),
             content=content,
             media=media or [],
-            metadata=metadata or {}
+            metadata=msg_metadata,
         )
         
         await self.bus.publish_inbound(msg)

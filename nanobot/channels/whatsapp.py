@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections import deque
 from typing import Any
 
@@ -91,6 +92,14 @@ class WhatsAppChannel(BaseChannel):
                     "presence": presence,
                 }
                 await self._ws.send(json.dumps(payload))
+                ready_perf = (msg.metadata or {}).get("_nb_response_ready_perf")
+                if isinstance(ready_perf, (int, float)):
+                    send_lag_ms = int(round((time.perf_counter() - float(ready_perf)) * 1000))
+                    logger.info(
+                        "WhatsApp presence sent in {}ms after response-ready (chat_id={})",
+                        send_lag_ms,
+                        msg.chat_id,
+                    )
                 return
 
             if not msg.content:
@@ -102,6 +111,15 @@ class WhatsAppChannel(BaseChannel):
                 "text": msg.content
             }
             await self._ws.send(json.dumps(payload))
+            ready_perf = (msg.metadata or {}).get("_nb_response_ready_perf")
+            if isinstance(ready_perf, (int, float)):
+                send_lag_ms = int(round((time.perf_counter() - float(ready_perf)) * 1000))
+                logger.info(
+                    "WhatsApp send in {}ms after response-ready (chat_id={}, chars={})",
+                    send_lag_ms,
+                    msg.chat_id,
+                    len(msg.content or ""),
+                )
         except Exception as e:
             logger.error(f"Error sending WhatsApp message: {e}")
     

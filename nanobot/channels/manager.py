@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, TYPE_CHECKING
 
 from loguru import logger
@@ -197,6 +198,15 @@ class ChannelManager:
                     self.bus.consume_outbound(),
                     timeout=1.0
                 )
+                ready_perf = (msg.metadata or {}).get("_nb_response_ready_perf")
+                if isinstance(ready_perf, (int, float)):
+                    dispatch_wait_ms = int(round((time.perf_counter() - float(ready_perf)) * 1000))
+                    logger.info(
+                        "Outbound dispatch wait {}ms (channel={}, chat_id={})",
+                        dispatch_wait_ms,
+                        msg.channel,
+                        msg.chat_id,
+                    )
                 
                 channel = self.channels.get(msg.channel)
                 if channel:
