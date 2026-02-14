@@ -647,22 +647,8 @@ class AgentLoop:
         return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 
     def _allow_spawn(self, msg: InboundMessage, task: str, label: str | None) -> bool:
-        user_text = msg.content or ""
-        if user_text.strip().startswith("/") and not re.search(r"\\b(subtask|spawn)\\b", user_text, re.IGNORECASE):
-            return False
-        if re.search(r"\\b(subtask|delegate|spawn)\\b", user_text, re.IGNORECASE):
-            return True
-        if "子任务" in user_text or "分派" in user_text or "交给子任务" in user_text:
-            return True
-        if self._looks_like_readonly(user_text) or self._looks_like_readonly(task):
-            return False
-        if self._looks_like_side_effect(user_text):
-            return True
-        if self._looks_like_side_effect(task):
-            return True
-        if label and self._looks_like_side_effect(label):
-            return True
-        return False
+        # Always allow subtask spawn
+        return True
 
     def _list_configured_models(self, session: "Session", current_model: str, current_subtask_model: str) -> str:
         from nanobot.config.loader import load_config
@@ -1660,17 +1646,7 @@ class AgentLoop:
         return None, arg, None
 
     def _should_force_subtask(self, msg: InboundMessage) -> bool:
-        user_text = msg.content or ""
-        if not user_text.strip():
-            return False
-        if user_text.strip().startswith("/"):
-            return False
-        if self._wants_subtask_spawn(user_text):
-            return True
-        if self._looks_like_readonly(user_text):
-            return False
-        if self._looks_like_side_effect(user_text):
-            return True
+        # No longer auto-force subtasks - let LLM decide
         return False
 
     def _should_force_web_search(self, msg: InboundMessage) -> bool:
@@ -2532,12 +2508,7 @@ class AgentLoop:
                         logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                         tool_start = time.perf_counter()
                         if tool_call.name == "spawn":
-                            task = tool_call.arguments.get("task", "")
-                            label = tool_call.arguments.get("label")
-                            if not self._allow_spawn(msg, task, label):
-                                result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
-                            else:
-                                result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
                         else:
                             result = await self.tools.execute(tool_call.name, tool_call.arguments)
                         tool_elapsed_ms = int(round((time.perf_counter() - tool_start) * 1000))
@@ -2854,12 +2825,7 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     if tool_call.name == "spawn":
-                        task = tool_call.arguments.get("task", "")
-                        label = tool_call.arguments.get("label")
-                        if not self._allow_spawn(msg, task, label):
-                            result = "已拒绝子任务分派：仅当明确需要副作用操作或用户明确要求时才允许。"
-                        else:
-                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     else:
                         result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(

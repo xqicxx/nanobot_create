@@ -17,37 +17,9 @@ _SENSITIVE_PATH_RE = re.compile(
     r"(?i)(\.ssh|\.env|/etc/|/var/|/root/|id_rsa|authorized_keys|known_hosts|\.aws)"
 )
 
+# Only direct disk write operations
 _HIGH_RISK_PATTERNS = [
-    r"\brm\s+-[rf]{1,2}\b",
-    r"\bdel\s+/[fq]\b",
-    r"\brmdir\s+/s\b",
-    r"\bdd\s+if=",
-    r"\b(format|mkfs|diskpart)\b",
-    r">\s*/dev/sd",
-    r"\bchmod\s+-R\b",
-    r"\bchown\s+-R\b",
-    r"\bicacls\b.*(/grant|/reset)",
-    r"\b(sudo|su|shutdown|reboot|poweroff|systemctl|launchctl)\b",
-    r"\b(curl|wget)\b.*\|\s*(sh|bash|zsh)\b",
-    r"\bbash\s+<\(",
-    r"\bkill\s+-9\b",
-    r"\bpkill\b",
-    r"\btaskkill\s+/f\b",
-    r"\b(env|printenv)\b",
-    r"\bcat\s+~/.ssh/",
-    r"\bcat\s+/etc/passwd\b",
-    r"\bcat\s+~/.aws/",
-    r"\balias\b",
-    r"\bexport\s+PATH=",
-    r"\bpython\s+-c\b",
-    r"\bperl\s+-e\b",
-    r"\bruby\s+-e\b",
-    r"\bnode\s+-e\b",
-    r"\bscp\b",
-    r"\brsync\b",
-    r"\bcurl\s+-F\b",
-    r"\bnc\b",
-    r"\bfind\b.*(-delete|-exec)\b",
+    r">\s*/dev/",
 ]
 
 
