@@ -63,7 +63,76 @@ _DEEP_RECALL_PATTERNS = (
     r"recall again",
     r"check memory again",
     r"search memory again",
+    r"(还|能|有没有).{0,6}(记得|回忆|想起)",
+    r"(上次|之前|前面|\bearlier\b|\bpreviously\b).{0,10}(说|聊|提|讲|tell|mention|discuss)",
+    r"(忘了|不记得|想不起来).{0,6}(上次|之前|那个|那件事)",
 )
+
+_DEEP_RECALL_MEMORY_TERMS = {
+    "记忆",
+    "记得",
+    "回忆",
+    "想起",
+    "想起来",
+    "memory",
+    "remember",
+    "recall",
+}
+
+_DEEP_RECALL_REFERENCE_TERMS = {
+    "上次",
+    "之前",
+    "前面",
+    "刚才",
+    " earlier ",
+    " previous ",
+    " before ",
+    "last time",
+    "we said",
+    "we talked",
+    "you said",
+}
+
+_DEEP_RECALL_ACTION_TERMS = {
+    "再",
+    "重新",
+    "再查",
+    "再看",
+    "检索",
+    "搜索",
+    "回顾",
+    "再想",
+    "again",
+    "re-",
+    "search",
+    "check",
+    "look up",
+}
+
+_DEEP_RECALL_UNCERTAIN_TERMS = {
+    "忘了",
+    "不记得",
+    "想不起来",
+    "没印象",
+    "记不清",
+    "forgot",
+    "can't remember",
+    "cannot remember",
+    "not sure",
+}
+
+
+def _contains_term(text_lower: str, text_flat: str, term: str) -> bool:
+    t = (term or "").lower().strip()
+    if not t:
+        return False
+    if " " in t:
+        return t in text_lower
+    return t in text_flat
+
+
+def _count_terms(text_lower: str, text_flat: str, terms: set[str]) -> int:
+    return sum(1 for term in terms if _contains_term(text_lower, text_flat, term))
 
 
 def _normalize_greeting(text: str) -> str:
@@ -258,10 +327,31 @@ class MemoryAdapter:
         return False
 
     def should_force_full_retrieve(self, message: str) -> bool:
-        text = (message or "").strip().lower()
-        if not text:
+        text_raw = (message or "").strip()
+        if not text_raw:
             return False
-        return any(re.search(pattern, text, re.IGNORECASE) for pattern in _DEEP_RECALL_PATTERNS)
+        text_lower = text_raw.lower()
+        text_flat = re.sub(r"\s+", "", text_lower)
+
+        if any(re.search(pattern, text_lower, re.IGNORECASE) for pattern in _DEEP_RECALL_PATTERNS):
+            return True
+
+        mem_hits = _count_terms(text_lower, text_flat, _DEEP_RECALL_MEMORY_TERMS)
+        ref_hits = _count_terms(text_lower, text_flat, _DEEP_RECALL_REFERENCE_TERMS)
+        action_hits = _count_terms(text_lower, text_flat, _DEEP_RECALL_ACTION_TERMS)
+        uncertain_hits = _count_terms(text_lower, text_flat, _DEEP_RECALL_UNCERTAIN_TERMS)
+
+        # Semantic intent heuristic:
+        # 1) Memory concept + (reference/action/uncertainty)
+        # 2) Strong historical reference + action/uncertainty
+        # 3) Question-form memory probe with historical reference
+        if mem_hits >= 1 and (ref_hits + action_hits + uncertain_hits) >= 1:
+            return True
+        if ref_hits >= 2 and (action_hits >= 1 or uncertain_hits >= 1):
+            return True
+        if ("?" in text_raw or "？" in text_raw) and (mem_hits + uncertain_hits) >= 1 and ref_hits >= 1:
+            return True
+        return False
 
     async def retrieve_context(
         self,
