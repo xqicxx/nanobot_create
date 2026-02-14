@@ -111,6 +111,7 @@ class MemoryAdapter:
     ):
         self.workspace = workspace
         self.retrieve_top_k = retrieve_top_k
+        self.retrieve_history_window = max(1, int(os.getenv("NANOBOT_MEMU_HISTORY_WINDOW", "4")))
         if memu_config is not None and not memu_config.enabled:
             enable_memory = False
         self.enable_memory = enable_memory
@@ -220,6 +221,19 @@ class MemoryAdapter:
             return True
         return False
 
+    def should_skip_retrieve(self, message: str) -> bool:
+        text = (message or "").strip()
+        if not text:
+            return True
+        if _is_pure_emoji_or_punct(text):
+            return True
+        if _only_greeting_or_ack(text):
+            return True
+        # Short non-question chit-chat is usually low-value for retrieval and adds latency.
+        if len(text) <= 4 and not re.search(r"[?？]|怎么|为何|为什么|谁|啥|吗|what|how|why|who|where|when", text, re.IGNORECASE):
+            return True
+        return False
+
     async def retrieve_context(
         self,
         *,
@@ -231,11 +245,13 @@ class MemoryAdapter:
     ) -> MemoryContext:
         if not self.enable_memory:
             return MemoryContext(text="")
+        if self.should_skip_retrieve(current_message):
+            return MemoryContext(text="")
 
         user_id = self.build_user_id(channel, chat_id, sender_id)
 
         queries: list[dict[str, Any]] = []
-        for msg in history[-6:]:
+        for msg in history[-self.retrieve_history_window:]:
             role = msg.get("role", "user")
             content = _extract_text(msg.get("content"))
             if not content:

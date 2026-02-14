@@ -47,6 +47,8 @@ class _StreamBuffer:
         self._min_chunk = max(1, min_chunk)
         self._max_chunk = max(self._min_chunk, max_chunk)
         self._min_interval = max(0.0, min_interval)
+        self._first_chunk_min = max(12, min(32, self._min_chunk))
+        self._first_chunk_max = max(self._first_chunk_min, min(280, self._max_chunk))
         self._buffer: str = ""
         self._sent_any = False
         self._last_flush = 0.0
@@ -73,19 +75,21 @@ class _StreamBuffer:
     def _find_split_index(self, *, force: bool) -> int:
         if not self._buffer:
             return 0
-        limit = len(self._buffer) if force else min(len(self._buffer), self._max_chunk)
-        if not force and len(self._buffer) < self._min_chunk:
+        min_required = self._first_chunk_min if not self._sent_any else self._min_chunk
+        chunk_limit = self._first_chunk_max if not self._sent_any else self._max_chunk
+        limit = len(self._buffer) if force else min(len(self._buffer), chunk_limit)
+        if not force and len(self._buffer) < min_required:
             return 0
 
         sentence_marks = "\n。！？.!?；;"
         for i in range(limit - 1, -1, -1):
             ch = self._buffer[i]
-            if ch in sentence_marks and (force or (i + 1) >= self._min_chunk):
+            if ch in sentence_marks and (force or (i + 1) >= min_required):
                 return i + 1
 
-        if len(self._buffer) >= self._max_chunk:
+        if len(self._buffer) >= chunk_limit:
             for i in range(limit - 1, -1, -1):
-                if self._buffer[i].isspace() and (force or (i + 1) >= self._min_chunk):
+                if self._buffer[i].isspace() and (force or (i + 1) >= min_required):
                     return i + 1
             return limit
 
@@ -96,10 +100,12 @@ class _StreamBuffer:
     async def _flush(self, *, force: bool) -> None:
         async with self._lock:
             now = time.monotonic()
+            min_required = self._first_chunk_min if not self._sent_any else self._min_chunk
+            interval_required = 0.2 if not self._sent_any else self._min_interval
             if (
                 not force
-                and len(self._buffer) < self._min_chunk
-                and (now - self._last_flush) < self._min_interval
+                and len(self._buffer) < min_required
+                and (now - self._last_flush) < interval_required
             ):
                 return
 
@@ -181,6 +187,10 @@ class AgentLoop:
         self.stream_enabled = bool(getattr(stream_config, "enabled", False)) if stream_config is not None else False
         stream_channels = getattr(stream_config, "channels", []) if stream_config is not None else []
         self.stream_channels = {c for c in stream_channels if isinstance(c, str)}
+        try:
+            self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "0.8")))
+        except Exception:
+            self.memu_retrieve_timeout_sec = 0.8
         
         self.context = ContextBuilder(workspace)
         memu_enabled = True
@@ -1727,15 +1737,18 @@ class AgentLoop:
         if msg.channel != "system":
             try:
                 memu_start = time.perf_counter()
-                memory_context = (
-                    await self.memory_adapter.retrieve_context(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        sender_id=msg.sender_id,
-                        history=session.get_history(),
-                        current_message=msg.content,
-                    )
-                ).text
+                retrieve_coro = self.memory_adapter.retrieve_context(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    sender_id=msg.sender_id,
+                    history=session.get_history(),
+                    current_message=msg.content,
+                )
+                if self.memu_retrieve_timeout_sec > 0:
+                    mem_ctx = await asyncio.wait_for(retrieve_coro, timeout=self.memu_retrieve_timeout_sec)
+                else:
+                    mem_ctx = await retrieve_coro
+                memory_context = mem_ctx.text
                 memu_retrieve_ms = int(round((time.perf_counter() - memu_start) * 1000))
                 logger.info(
                     "MemU retrieve in {}ms (channel={}, sender={}, history_len={}, msg_len={})",
@@ -1744,6 +1757,15 @@ class AgentLoop:
                     msg.sender_id,
                     len(session.get_history()),
                     len(msg.content or ""),
+                )
+            except asyncio.TimeoutError:
+                memu_retrieve_ms = int(round((time.perf_counter() - memu_start) * 1000))
+                logger.warning(
+                    "MemU retrieve timed out in {}ms (timeout={}ms, channel={}, sender={})",
+                    memu_retrieve_ms,
+                    int(round(self.memu_retrieve_timeout_sec * 1000)),
+                    msg.channel,
+                    msg.sender_id,
                 )
             except Exception as exc:
                 logger.warning(f"MemU context fetch failed: {exc}")
