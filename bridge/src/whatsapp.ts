@@ -243,7 +243,7 @@ export class WhatsAppClient {
     mediaPath?: string;
     mediaType?: 'image' | 'video' | 'document' | 'audio';
   }> {
-    const message = msg.message;
+    const message = this.unwrapMessageContainer(msg.message);
     if (!message) return { content: null };
 
     // Text message
@@ -299,6 +299,44 @@ export class WhatsAppClient {
     return { content: null };
   }
 
+  private unwrapMessageContainer(message: any): any {
+    let current = message;
+    const visited = new Set<any>();
+    while (current && typeof current === 'object' && !visited.has(current)) {
+      visited.add(current);
+      if (current.ephemeralMessage?.message) {
+        current = current.ephemeralMessage.message;
+        continue;
+      }
+      if (current.viewOnceMessage?.message) {
+        current = current.viewOnceMessage.message;
+        continue;
+      }
+      if (current.viewOnceMessageV2?.message) {
+        current = current.viewOnceMessageV2.message;
+        continue;
+      }
+      if (current.viewOnceMessageV2Extension?.message) {
+        current = current.viewOnceMessageV2Extension.message;
+        continue;
+      }
+      if (current.deviceSentMessage?.message) {
+        current = current.deviceSentMessage.message;
+        continue;
+      }
+      if (current.editedMessage?.message) {
+        current = current.editedMessage.message;
+        continue;
+      }
+      if (current.documentWithCaptionMessage?.message) {
+        current = current.documentWithCaptionMessage.message;
+        continue;
+      }
+      break;
+    }
+    return current;
+  }
+
   private formatMediaContent(kind: string, mediaPath: string | null, caption?: string): string {
     const prefix = mediaPath ? `[${kind}: ${mediaPath}]` : `[${kind}]`;
     return caption ? `${prefix} ${caption}` : prefix;
@@ -322,7 +360,7 @@ export class WhatsAppClient {
       );
       if (!raw) return null;
       const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-      const maxSizeBytes = 12 * 1024 * 1024;
+      const maxSizeBytes = 20 * 1024 * 1024;
       if (buffer.length > maxSizeBytes) {
         if (WA_DEBUG) console.error(`media too large (${buffer.length} bytes), skip save`);
         return null;
@@ -335,7 +373,7 @@ export class WhatsAppClient {
       await writeFile(filePath, buffer);
       return filePath;
     } catch (err) {
-      if (WA_DEBUG) console.error('saveMediaMessage failed:', err);
+      console.error('saveMediaMessage failed:', err instanceof Error ? err.message : String(err));
       return null;
     }
   }

@@ -155,6 +155,10 @@ class LiteLLMProvider(LLMProvider):
             "temperature": temperature,
             "stream": True,
         }
+        if spec.name == "minimax":
+            # MiniMax OpenAI-compatible streaming: return reasoning in reasoning_details
+            # so content stays clean for user output.
+            kwargs["extra_body"] = {"reasoning_split": True}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -167,6 +171,9 @@ class LiteLLMProvider(LLMProvider):
         try:
             stream = await client.chat.completions.create(**kwargs)
             content_parts: list[str] = []
+            content_seen = ""
+            reasoning_parts: list[str] = []
+            reasoning_seen = ""
             tool_call_map: dict[int, dict[str, Any]] = {}
             finish_reason = "stop"
 
@@ -180,9 +187,40 @@ class LiteLLMProvider(LLMProvider):
 
                 delta_content = getattr(delta, "content", None)
                 if delta_content:
-                    content_parts.append(delta_content)
-                    if on_token:
-                        on_token(delta_content)
+                    piece = str(delta_content)
+                    if spec.name == "minimax":
+                        # MiniMax may return cumulative text in delta.content.
+                        if piece.startswith(content_seen):
+                            piece = piece[len(content_seen):]
+                            content_seen = str(delta_content)
+                        else:
+                            content_seen += piece
+                    else:
+                        content_seen += piece
+
+                    if piece:
+                        content_parts.append(piece)
+                        if on_token:
+                            on_token(piece)
+
+                if spec.name == "minimax":
+                    delta_reasoning = getattr(delta, "reasoning_details", None)
+                    if delta_reasoning:
+                        for detail in delta_reasoning:
+                            if isinstance(detail, dict):
+                                text = str(detail.get("text") or "")
+                            else:
+                                text = str(getattr(detail, "text", "") or "")
+                            if not text:
+                                continue
+                            piece = text
+                            if text.startswith(reasoning_seen):
+                                piece = text[len(reasoning_seen):]
+                                reasoning_seen = text
+                            else:
+                                reasoning_seen += text
+                            if piece:
+                                reasoning_parts.append(piece)
 
                 delta_tool_calls = getattr(delta, "tool_calls", None)
                 if delta_tool_calls:
@@ -219,10 +257,12 @@ class LiteLLMProvider(LLMProvider):
                         )
                     )
 
+            reasoning_text = reasoning_seen or ("".join(reasoning_parts) if reasoning_parts else None)
             return LLMResponse(
                 content="".join(content_parts) if content_parts else None,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                reasoning_content=reasoning_text,
             )
         except Exception as exc:
             logger.warning(

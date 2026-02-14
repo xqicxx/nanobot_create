@@ -223,10 +223,11 @@ class SubagentManager:
                 tools.register(cron_tool)
             
             # Build messages with subagent-specific prompt
-            system_prompt = self._build_subagent_prompt(task)
+            task_brief = self._build_subagent_task_brief(task, label)
+            system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
+                {"role": "user", "content": task_brief},
             ]
             
             # Run agent loop (limited iterations)
@@ -266,6 +267,7 @@ class SubagentManager:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
+                        _record_evidence("执行步骤", f"iter={iteration}; tool={tool_call.name}; args={args_str}")
 
                         is_side_effect = tool_call.name in {"write_file", "edit_file", "cron"}
                         if tool_call.name == "exec":
@@ -526,26 +528,37 @@ Result:
         await self.bus.publish_inbound(msg)
         logger.debug(f"Subagent [{task_id}] announced result to {origin['channel']}:{origin['chat_id']}")
     
-    def _build_subagent_prompt(self, task: str) -> str:
+    def _build_subagent_task_brief(self, task: str, label: str) -> str:
+        return f"""任务标题：{label}
+
+原始任务：
+{task}
+
+执行要求（MiniMax Coding Plan best practice）：
+1. 先识别“目标 + 意图”，只做与目标直接相关的动作。
+2. 若是长任务，按最小可完成子步骤串行推进，并保留步骤证据。
+3. 优先调用最必要的工具，避免无意义并行与重复调用。
+4. 输出必须可验证：命令输出、文件差异或结果片段。"""
+
+    def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""
         return f"""# Subagent
 
 You are a subagent spawned by the main agent to complete a specific task.
 
-## Your Task
-{task}
-
 ## Rules
-1. Stay focused - complete only the assigned task, nothing else
-2. Only one side-effect action per task (single write/edit/exec). If more needed, stop and report.
-3. Your final response must be structured with: 状态/错误归因/结论/证据/风险/下一步/Exit Code
-4. Do not initiate conversations or take on side tasks
+1. Stay focused - complete only the assigned task, nothing else.
+2. Follow instruction + intent from the user task brief before making tool calls.
+3. If task is long, decompose into minimal sequential steps and track step evidence.
+4. Only one side-effect action per task (single write/edit/exec). If more needed, stop and report.
+5. Your final response must be structured with: 状态/错误归因/结论/证据/风险/下一步/Exit Code.
+6. Do not initiate conversations or take on side tasks.
 
 ## What You Can Do
 - Read and write files in the workspace
 - Execute shell commands
 - Search the web and fetch web pages
-- Complete the task thoroughly
+- Complete the assigned task thoroughly
 
 ## What You Cannot Do
 - Send messages directly to users (no message tool available)
@@ -554,8 +567,7 @@ You are a subagent spawned by the main agent to complete a specific task.
 
 ## Workspace
 Your workspace is at: {self.workspace}
-
-When you have completed the task, provide a clear summary of your findings or actions."""
+"""
     
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

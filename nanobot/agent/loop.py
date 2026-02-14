@@ -332,6 +332,8 @@ class AgentLoop:
         self.stream_enabled = bool(getattr(stream_config, "enabled", False)) if stream_config is not None else False
         stream_channels = getattr(stream_config, "channels", []) if stream_config is not None else []
         self.stream_channels = {c for c in stream_channels if isinstance(c, str)}
+        # Disable bot-side chunk pushing by default; keep provider streaming for latency.
+        self.stream_push_enabled = bool(getattr(stream_config, "push_enabled", False)) if stream_config is not None else False
         try:
             self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "1.2")))
         except Exception:
@@ -517,7 +519,7 @@ class AgentLoop:
                     stream_buffer: _StreamBuffer | None = None
                     think_filter: _ThinkTagFilter | None = None
                     stream_callback: Callable[[str], None] | None = None
-                    if self._should_stream_channel(msg.channel) and msg.channel != "cli":
+                    if self.stream_push_enabled and self._should_stream_channel(msg.channel) and msg.channel != "cli":
                         stream_buffer = _StreamBuffer(
                             bus=self.bus,
                             channel=msg.channel,
@@ -1058,7 +1060,7 @@ class AgentLoop:
             if not self.active_subtasks and not self.completed_subtasks_order:
                 content = (
                     "当前没有在跑的子任务，也没有最近的完成记录。\n"
-                    "用法：/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <task_id> | /subtask clear"
+                    f"用法：{self._subtask_usage_line()}"
                 )
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
             lines: list[str] = []
@@ -1079,7 +1081,7 @@ class AgentLoop:
                     status = info.get("status") or "ok"
                     model = info.get("model") or "default"
                     lines.append(f"{idx}. id={task_id} | label={label} | model={model} | status={status}")
-            lines.append("用法：/subtask run [-m <模型>] <任务> | /subtask <id> | /subtask recent | /subtask clear")
+            lines.append(f"用法：{self._subtask_usage_line()}")
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
 
         if arg_lower in {"recent", "history"}:
@@ -1102,7 +1104,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if arg_lower in {"help", "?"}:
-            content = "用法：/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <task_id> | /subtask clear"
+            content = f"用法：{self._subtask_usage_line()}"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         task_id = arg
@@ -1276,7 +1278,17 @@ class AgentLoop:
         self._provider_cache[model] = provider
         return provider
 
-    def _should_stream(self, channel: str | None, stream_callback: Any | None) -> bool:
+    @staticmethod
+    def _is_minimax_model(model: str | None) -> bool:
+        if not model:
+            return False
+        lowered = model.strip().lower()
+        return lowered.startswith("minimax/") or lowered.startswith("minimax-") or lowered == "minimax"
+
+    def _should_stream(self, channel: str | None, stream_callback: Any | None, *, model: str | None = None) -> bool:
+        # MiniMax: always use provider-native streaming API, even if we don't emit chunk messages.
+        if self._is_minimax_model(model):
+            return True
         if not stream_callback:
             return False
         if not self.stream_enabled:
@@ -1386,27 +1398,80 @@ class AgentLoop:
         return f"已将 {tool_name} 交由子任务执行。"
 
     def _build_subtask_task(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
+        def _brief(*, goal: str, intent: str, payload: dict[str, Any], acceptance: list[str]) -> str:
+            lines = [
+                "子任务目标：",
+                goal,
+                "",
+                "任务意图：",
+                intent,
+                "",
+                "输入参数：",
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                "",
+                "完成标准：",
+            ]
+            for idx, item in enumerate(acceptance, start=1):
+                lines.append(f"{idx}. {item}")
+            lines.extend([
+                "",
+                "执行约束：",
+                "1. 仅完成与目标直接相关的动作。",
+                "2. 若信息不足，先返回缺失点与建议补充项。",
+                "3. 输出必须可验证（命令输出、文件差异或结果证据）。",
+            ])
+            return "\n".join(lines)
+
         if tool_name == "write_file":
             path = args.get("path", "")
-            content = args.get("content", "")
-            task = f"写入文件：{path}\\n内容：\\n{content}"
+            task = _brief(
+                goal=f"将内容写入文件 `{path}`。",
+                intent="通过单次写入完成文件创建/覆盖，满足主任务需求。",
+                payload={"path": path, "content": args.get("content", "")},
+                acceptance=[
+                    "文件写入成功且可读取。",
+                    "返回写入后的关键证据（如前几行内容或长度）。",
+                ],
+            )
             label = f"write:{Path(path).name or 'file'}"
             return task, label
         if tool_name == "edit_file":
             path = args.get("path", "")
-            old_text = args.get("old_text", "")
-            new_text = args.get("new_text", "")
-            task = (
-                f"编辑文件：{path}\\n"
-                f"替换：\\n{old_text}\\n"
-                f"为：\\n{new_text}"
+            task = _brief(
+                goal=f"在文件 `{path}` 中完成定点替换修改。",
+                intent="以最小改动完成编辑，避免引入无关变更。",
+                payload={
+                    "path": path,
+                    "old_text": args.get("old_text", ""),
+                    "new_text": args.get("new_text", ""),
+                },
+                acceptance=[
+                    "替换操作执行成功。",
+                    "返回修改前后差异证据（diff 或关键片段）。",
+                ],
             )
             label = f"edit:{Path(path).name or 'file'}"
             return task, label
         if tool_name == "cron":
-            task = f"设置定时任务：{json.dumps(args, ensure_ascii=False)}"
+            task = _brief(
+                goal="创建或更新定时任务配置。",
+                intent="将任务调度规则准确落地并可核验。",
+                payload=args,
+                acceptance=[
+                    "定时任务创建/更新成功。",
+                    "返回调度配置与执行证据。",
+                ],
+            )
             return task, "cron"
-        task = f"执行工具 {tool_name}：{json.dumps(args, ensure_ascii=False)}"
+        task = _brief(
+            goal=f"执行工具 `{tool_name}` 并返回结果。",
+            intent="在不扩展需求的前提下完成一次可验证的工具执行。",
+            payload={"tool_name": tool_name, "arguments": args},
+            acceptance=[
+                "工具调用成功或给出明确失败原因。",
+                "返回原始执行证据与下一步建议。",
+            ],
+        )
         return task, tool_name
 
     def _build_spawn_ack(self, user_request: str, spawned: list[dict[str, Any]]) -> str:
@@ -1828,26 +1893,139 @@ class AgentLoop:
         content += f"\nGit：{commit}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
-    def _format_system_list(self) -> str:
-        lines = [
-            "系统命令：",
-            "/system list - 显示系统命令总览",
-            "/menu list - 菜单命令总览",
-            "/menu all - 全量命令（含分类）",
-            "/menu status [fast|full] - MemU 状态",
-            "/menu tune [show|speed|balanced|recall|set ...] - MemU 调优",
-            "/menu category list|add|update|delete - 分类配置",
-            "/menu subtask run|list|recent|<id>|clear - 子任务管理（路由到 /subtask）",
-            "/menu restart now - 重启 agent 进程",
-            "/menu version - 版本信息",
-            "",
-            "子任务命令：",
-            "/subtask list - 查看运行中/最近完成",
-            "/subtask recent - 最近完成列表",
-            "/subtask <id> - 查看任务详情",
-            "/subtask run [-m <模型>] <任务> - 手动创建子任务",
-            "/subtask clear - 清理历史记录",
+    def _system_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/system list", "系统命令总览"),
         ]
+
+    def _menu_base_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/menu list", "菜单命令总览"),
+            ("/menu all", "全量命令（含分类）"),
+            ("/menu categories", "显示所有分类与描述"),
+            ("/menu restart now", "重启 agent 进程"),
+            ("/menu version", "版本信息（路由到 /version）"),
+        ]
+
+    @staticmethod
+    def _rewrite_command_prefix(command: str, source: str, target: str) -> str | None:
+        if command == source:
+            return target
+        if command.startswith(source + " "):
+            return target + command[len(source) :]
+        return None
+
+    @staticmethod
+    def _dedupe_command_specs(specs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        seen: set[str] = set()
+        unique: list[tuple[str, str]] = []
+        for command, desc in specs:
+            key = command.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((command, desc))
+        return unique
+
+    def _menu_routed_command_specs(self) -> list[tuple[str, str]]:
+        specs: list[tuple[str, str]] = []
+
+        for command, desc in self._model_command_specs():
+            mapped = self._rewrite_command_prefix(command, "/model", "/menu model")
+            if mapped:
+                specs.append((mapped, f"{desc}（路由）"))
+
+        memu_routes = (
+            ("/memu status", "/menu status"),
+            ("/memu tune", "/menu tune"),
+            ("/memu category", "/menu category"),
+        )
+        for command, desc in self._memu_command_specs():
+            for source, target in memu_routes:
+                mapped = self._rewrite_command_prefix(command, source, target)
+                if mapped:
+                    specs.append((mapped, f"{desc}（路由）"))
+                    break
+
+        for command, desc in self._subtask_command_specs():
+            mapped = self._rewrite_command_prefix(command, "/subtask", "/menu subtask")
+            if mapped:
+                specs.append((mapped, f"{desc}（路由）"))
+
+        return self._dedupe_command_specs(specs)
+
+    def _menu_command_specs(self) -> list[tuple[str, str]]:
+        return self._dedupe_command_specs(
+            [*self._menu_base_command_specs(), *self._menu_routed_command_specs()]
+        )
+
+    def _subtask_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/subtask list", "查看运行中/最近完成"),
+            ("/subtask recent", "最近完成列表"),
+            ("/subtask <id>", "查看任务详情"),
+            ("/subtask run [-m <模型>] <任务>", "手动创建子任务"),
+            ("/subtask clear", "清理历史记录"),
+        ]
+
+    def _model_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/model list", "查看可用模型与当前模型"),
+            ("/model <模型名>", "切换当前会话模型"),
+            ("/model reset", "恢复默认模型"),
+            ("/model sub <模型名>", "设置子任务模型"),
+            ("/model sub reset", "恢复子任务默认模型"),
+            ("/model clean", "清理模型历史"),
+        ]
+
+    def _memu_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/memu status [fast|full]", "MemU 健康与读写检查"),
+            ("/memu tune [show|speed|balanced|recall|set ...]", "MemU 运行时调优"),
+            ("/memu category list", "查看记忆分类"),
+            ("/memu category add <名称> [| 描述]", "新增分类"),
+            ("/memu category update <名称> | <新描述>", "更新分类"),
+            ("/memu category delete <名称>", "删除分类"),
+        ]
+
+    def _misc_command_specs(self) -> list[tuple[str, str]]:
+        return [
+            ("/version", "版本信息"),
+        ]
+
+    def _command_sections(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        return [
+            ("系统命令", self._system_command_specs()),
+            ("菜单命令", self._menu_command_specs()),
+            ("子任务命令", self._subtask_command_specs()),
+            ("模型命令", self._model_command_specs()),
+            ("MemU 命令", self._memu_command_specs()),
+            ("其他命令", self._misc_command_specs()),
+        ]
+
+    @staticmethod
+    def _format_command_lines(specs: list[tuple[str, str]]) -> list[str]:
+        lines: list[str] = []
+        for cmd, desc in specs:
+            line = f"{cmd} {desc}".strip()
+            lines.append(line)
+        return lines
+
+    def _subtask_usage_line(self) -> str:
+        return " | ".join(cmd for cmd, _ in self._subtask_command_specs())
+
+    def _format_menu_list(self) -> str:
+        lines = ["菜单命令："]
+        lines.extend(self._format_command_lines(self._menu_command_specs()))
+        return "\n".join(lines)
+
+    def _format_system_list(self) -> str:
+        lines: list[str] = []
+        for idx, (title, specs) in enumerate(self._command_sections()):
+            if idx:
+                lines.append("")
+            lines.append(f"{title}：")
+            lines.extend(self._format_command_lines(specs))
         return "\n".join(lines)
 
     async def _handle_system_command(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -1905,28 +2083,7 @@ class AgentLoop:
             return await self._handle_memu_command(forwarded)
         if arg_lower in {"all", "full"}:
             categories = self.memory_adapter.list_category_config()
-            lines = [
-                "全部命令（原始 + /menu 路由）：",
-                "/model list | /model <模型名> | /model reset",
-                "/model sub <模型名> | /model sub reset",
-                "/model clean",
-                "/memu status [fast|full]",
-                "/memu tune [show|speed|balanced|recall|set ...]",
-                "/memu category list | /memu category add <名称> [| 描述]",
-                "/memu category update <名称> | <新描述> | /memu category delete <名称>",
-                "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
-                "/version",
-                "/system list",
-                "/menu list",
-                "/menu model ...",
-                "/menu status [fast|full]",
-                "/menu tune ...",
-                "/menu category ...",
-                "/menu categories",
-                "/menu subtask ...",
-                "/menu restart now",
-                "/menu version",
-            ]
+            lines = ["全部命令（动态）：", self._format_system_list()]
             if categories:
                 lines.append("")
                 lines.append("当前分类：")
@@ -2007,26 +2164,17 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return self._handle_version_command(forwarded)
-        if arg_lower not in {"list", "ls", "help", "?"}:
-            arg_lower = "list"
-        lines = [
-            "可用 /menu 子命令：",
-            "/menu list",
-            "/menu all",
-            "/system list",
-            "/menu model list | /menu model <模型名> | /menu model reset",
-            "/menu model sub <模型名> | /menu model sub reset",
-            "/menu model clean",
-            "/menu status [fast|full]",
-            "/menu tune [show|speed|balanced|recall|set ...]",
-            "/menu category list | /menu category add <名称> [| 描述]",
-            "/menu category update <名称> | <新描述> | /menu category delete <名称>",
-            "/menu categories (显示所有分类与描述)",
-            "/menu subtask run [-m <模型>] <任务> | /menu subtask list | /menu subtask recent | /menu subtask <id> | /menu subtask clear",
-            "/menu restart now",
-            "/menu version",
-        ]
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
+        if arg_lower in {"list", "ls", "help", "?"}:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_menu_list(),
+            )
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="用法：/menu list | /menu all | /system list",
+        )
 
     def _is_systemd_managed(self) -> bool:
         # systemd usually injects one of these env vars for managed services.
@@ -2343,7 +2491,11 @@ class AgentLoop:
                 
                 # Call LLM
                 llm_start = time.perf_counter()
-                use_stream = self._should_stream(msg.channel, stream_callback)
+                use_stream = self._should_stream(msg.channel, stream_callback, model=session_model)
+                if use_stream and self._is_minimax_model(session_model) and stream_callback is None:
+                    logger.info(
+                        "MiniMax native streaming enabled (provider-side, outbound chunk streaming disabled)"
+                    )
                 response = await self._get_provider_for_model(session_model).chat(
                     messages=messages,
                     tools=self.tools.get_definitions(),
