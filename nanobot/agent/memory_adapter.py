@@ -215,7 +215,7 @@ class MemoryAdapter:
         """Initialize MemoryAgent and RecallAgent with LLM client."""
         try:
             from memu.memory import MemoryAgent, RecallAgent
-            from memu.llm import OpenAIClient, DeepseekClient
+            from memu.llm import OpenAIClient, DeepSeekClient
         except Exception as exc:
             logger.error(f"Failed to import MemU modules: {exc}")
             self.enable_memory = False
@@ -251,7 +251,7 @@ class MemoryAdapter:
     def _create_llm_client(self) -> Any | None:
         """Create LLM client from configuration."""
         try:
-            from memu.llm import OpenAIClient, DeepseekClient
+            from memu.llm import OpenAIClient, DeepSeekClient
         except Exception:
             return None
 
@@ -269,7 +269,7 @@ class MemoryAdapter:
 
         try:
             if provider == "deepseek" or "deepseek" in base_url.lower():
-                return DeepseekClient(
+                return DeepSeekClient(
                     api_key=api_key,
                     base_url=base_url,
                     model=chat_model,
