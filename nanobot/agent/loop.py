@@ -22,7 +22,12 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, ListDirTool, WriteFileTool, EditFileTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.readonly_exec import ReadOnlyExecTool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool, UnderstandImageTool
+from nanobot.agent.tools.web import (
+    DEFAULT_MINIMAX_MCP_HOST,
+    WebSearchTool,
+    WebFetchTool,
+    UnderstandImageTool,
+)
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.delegate import DelegateTool
@@ -372,7 +377,7 @@ class AgentLoop:
         mcp_cfg = self.minimax_mcp_config
         minimax_mcp_enabled = bool(getattr(mcp_cfg, "enabled", False)) if mcp_cfg is not None else False
         minimax_mcp_key = (getattr(mcp_cfg, "api_key", "") or self.minimax_api_key or "").strip() if mcp_cfg is not None else (self.minimax_api_key or "").strip()
-        minimax_mcp_host = getattr(mcp_cfg, "api_host", "https://api.minimax.chat") if mcp_cfg is not None else "https://api.minimax.chat"
+        minimax_mcp_host = getattr(mcp_cfg, "api_host", DEFAULT_MINIMAX_MCP_HOST) if mcp_cfg is not None else DEFAULT_MINIMAX_MCP_HOST
         minimax_mcp_timeout = float(getattr(mcp_cfg, "timeout_seconds", 15)) if mcp_cfg is not None else 15.0
         minimax_web_enabled = bool(getattr(mcp_cfg, "enable_web_search", True)) if mcp_cfg is not None else True
         minimax_image_enabled = bool(getattr(mcp_cfg, "enable_image_understanding", True)) if mcp_cfg is not None else True
@@ -1562,7 +1567,7 @@ class AgentLoop:
         path = Path(source).expanduser()
         if path.exists() and path.is_file():
             return True
-        return Path(source).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        return Path(source).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
     def _collect_image_sources(self, msg: InboundMessage) -> list[str]:
         media_type = str((msg.metadata or {}).get("media_type", "")).lower() or None

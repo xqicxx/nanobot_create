@@ -263,7 +263,7 @@ class MiniMaxMCPConfig(BaseModel):
     """MiniMax Coding Plan MCP-compatible API settings."""
     enabled: bool = True
     api_key: str = ""
-    api_host: str = "https://api.minimax.chat"
+    api_host: str = "https://api.minimaxi.com"
     timeout_seconds: int = 15
     enable_web_search: bool = True
     enable_image_understanding: bool = True

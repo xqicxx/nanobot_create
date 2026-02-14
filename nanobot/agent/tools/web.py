@@ -17,9 +17,9 @@ from nanobot.agent.tools.base import Tool
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
-DEFAULT_MINIMAX_MCP_HOST = "https://api.minimax.chat"
+DEFAULT_MINIMAX_MCP_HOST = "https://api.minimaxi.com"
 DEFAULT_MINIMAX_TIMEOUT = 15.0
-MAX_IMAGE_SOURCE_BYTES = 10 * 1024 * 1024  # 10MB
+MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024  # 20MB
 
 
 def _strip_tags(text: str) -> str:
@@ -58,15 +58,34 @@ class _MiniMaxMCPClient:
         if host.endswith("/v1"):
             host = host[:-3]
         self.api_host = host or DEFAULT_MINIMAX_MCP_HOST
-        # Smart fallback: users often set LLM host (minimaxi.com/v1) instead of MCP host.
-        self._host_candidates = [self.api_host]
-        if (
-            "minimax.chat" not in self.api_host
-            and "minimax" in self.api_host
-            and DEFAULT_MINIMAX_MCP_HOST not in self._host_candidates
-        ):
-            self._host_candidates.append(DEFAULT_MINIMAX_MCP_HOST)
+        # Official regional hosts:
+        # - Mainland: https://api.minimaxi.com
+        # - Global:   https://api.minimax.io
+        # Keep compatibility with legacy minimax.chat configs.
+        self._host_candidates = self._build_host_candidates(self.api_host)
         self.timeout = timeout
+
+    @staticmethod
+    def _build_host_candidates(host: str) -> list[str]:
+        ordered: list[str] = []
+
+        def _add(candidate: str) -> None:
+            normalized = (candidate or "").strip().rstrip("/")
+            if normalized and normalized not in ordered:
+                ordered.append(normalized)
+
+        _add(host)
+        if "minimax.chat" in host:
+            _add("https://api.minimaxi.com")
+            _add("https://api.minimax.io")
+        elif "minimaxi.com" in host:
+            _add("https://api.minimax.io")
+        elif "minimax.io" in host:
+            _add("https://api.minimaxi.com")
+        else:
+            _add("https://api.minimaxi.com")
+            _add("https://api.minimax.io")
+        return ordered
 
     @property
     def enabled(self) -> bool:
@@ -126,10 +145,10 @@ class _MiniMaxMCPClient:
                 response.raise_for_status()
                 image_bytes = response.content
                 if len(image_bytes) > MAX_IMAGE_SOURCE_BYTES:
-                    raise RuntimeError("image_source is too large (>10MB)")
+                    raise RuntimeError("image_source is too large (>20MB)")
                 mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
-                    # API supports jpg/png/webp. Fall back to jpeg if unknown.
+                if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}:
+                    # API supports jpg/png/webp/gif. Fall back to jpeg if unknown.
                     mime = "image/jpeg"
             b64 = base64.b64encode(image_bytes).decode("utf-8")
             return f"data:{mime};base64,{b64}"
@@ -139,15 +158,17 @@ class _MiniMaxMCPClient:
             raise RuntimeError(f"image file not found: {source}")
         image_bytes = path.read_bytes()
         if len(image_bytes) > MAX_IMAGE_SOURCE_BYTES:
-            raise RuntimeError("image_source is too large (>10MB)")
+            raise RuntimeError("image_source is too large (>20MB)")
         mime, _ = mimetypes.guess_type(str(path))
         mime = (mime or "image/jpeg").lower()
-        if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}:
             ext = path.suffix.lower()
             if ext == ".png":
                 mime = "image/png"
             elif ext == ".webp":
                 mime = "image/webp"
+            elif ext == ".gif":
+                mime = "image/gif"
             else:
                 mime = "image/jpeg"
         b64 = base64.b64encode(image_bytes).decode("utf-8")

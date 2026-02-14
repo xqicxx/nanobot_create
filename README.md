@@ -711,12 +711,16 @@ MiniMax MCP config example:
     "mcp": {
       "minimax": {
         "enabled": true,
-        "apiHost": "https://api.minimax.chat"
+        "apiHost": "https://api.minimaxi.com"
       }
     }
   }
 }
 ```
+
+MiniMax MCP host by region:
+- Mainland China: `https://api.minimaxi.com`
+- International: `https://api.minimax.io`
 
 <details>
 <summary><b>Scheduled Tasks (Cron)</b></summary>
