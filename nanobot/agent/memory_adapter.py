@@ -209,6 +209,66 @@ class MemoryAdapter:
         self.memu_config = memu_config
         self._memu = memu_service or (self._init_memu_service() if self.enable_memory else None)
 
+    def get_retrieve_tuning(self) -> dict[str, int]:
+        return {
+            "top_k": int(self.retrieve_top_k),
+            "top_k_full": int(self.retrieve_top_k_full),
+            "history_window": int(self.retrieve_history_window),
+            "history_window_full": int(self.retrieve_history_window_full),
+        }
+
+    def update_retrieve_tuning(
+        self,
+        *,
+        top_k: int | None = None,
+        top_k_full: int | None = None,
+        history_window: int | None = None,
+        history_window_full: int | None = None,
+    ) -> dict[str, Any]:
+        def _require_positive(name: str, value: int | None) -> tuple[int | None, str | None]:
+            if value is None:
+                return None, None
+            if not isinstance(value, int) or value <= 0:
+                return None, f"{name} must be a positive integer"
+            return value, None
+
+        top_k_v, err = _require_positive("top_k", top_k)
+        if err:
+            return {"ok": False, "error": err}
+        top_k_full_v, err = _require_positive("top_k_full", top_k_full)
+        if err:
+            return {"ok": False, "error": err}
+        history_v, err = _require_positive("history_window", history_window)
+        if err:
+            return {"ok": False, "error": err}
+        history_full_v, err = _require_positive("history_window_full", history_window_full)
+        if err:
+            return {"ok": False, "error": err}
+
+        if top_k_v is not None:
+            self.retrieve_top_k = top_k_v
+        if history_v is not None:
+            self.retrieve_history_window = history_v
+
+        if top_k_full_v is not None:
+            self.retrieve_top_k_full = top_k_full_v
+        if history_full_v is not None:
+            self.retrieve_history_window_full = history_full_v
+
+        # Full mode should never be narrower than base mode.
+        self.retrieve_top_k_full = max(self.retrieve_top_k, self.retrieve_top_k_full)
+        self.retrieve_history_window_full = max(self.retrieve_history_window, self.retrieve_history_window_full)
+
+        retrieve_cfg = getattr(self._memu, "retrieve_config", None) if self._memu is not None else None
+        item_cfg = getattr(retrieve_cfg, "item", None) if retrieve_cfg is not None else None
+        if item_cfg is not None and hasattr(item_cfg, "top_k"):
+            try:
+                item_cfg.top_k = int(self.retrieve_top_k)
+            except Exception:
+                pass
+
+        return {"ok": True, "tuning": self.get_retrieve_tuning()}
+
     def _init_memu_service(self) -> Any:
         try:
             from memu.app import MemoryService

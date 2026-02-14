@@ -246,6 +246,13 @@ class AgentLoop:
             self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "1.2")))
         except Exception:
             self.memu_retrieve_timeout_sec = 1.2
+        try:
+            self.memu_retrieve_timeout_full_sec = max(
+                self.memu_retrieve_timeout_sec,
+                float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC_FULL", "3.0")),
+            )
+        except Exception:
+            self.memu_retrieve_timeout_full_sec = max(self.memu_retrieve_timeout_sec, 3.0)
         
         self.context = ContextBuilder(workspace)
         memu_enabled = True
@@ -682,6 +689,98 @@ class AgentLoop:
 
         return "\n".join(lines)
 
+    def _current_memu_tune(self) -> dict[str, Any]:
+        tune = self.memory_adapter.get_retrieve_tuning()
+        tune["timeout_sec"] = round(float(self.memu_retrieve_timeout_sec), 3)
+        tune["timeout_full_sec"] = round(float(self.memu_retrieve_timeout_full_sec), 3)
+        return tune
+
+    def _format_memu_tune(self) -> str:
+        tune = self._current_memu_tune()
+        lines = [
+            "MemU 当前调优参数：",
+            f"timeout_sec={tune['timeout_sec']}",
+            f"timeout_full_sec={tune['timeout_full_sec']}",
+            f"top_k={tune['top_k']}",
+            f"top_k_full={tune['top_k_full']}",
+            f"history_window={tune['history_window']}",
+            f"history_window_full={tune['history_window_full']}",
+            "",
+            "预设：/memu tune speed | balanced | recall",
+            "自定义：/memu tune set timeout=1.2 timeout_full=3 top_k=5 top_k_full=12 history=4 history_full=12",
+            "说明：本命令即时生效，仅当前进程有效；重启后会回到 config/env。",
+        ]
+        return "\n".join(lines)
+
+    def _parse_memu_tune_overrides(self, text: str) -> tuple[dict[str, float | int], str | None]:
+        aliases = {
+            "timeout": "timeout_sec",
+            "timeout_sec": "timeout_sec",
+            "timeout_full": "timeout_full_sec",
+            "timeout_full_sec": "timeout_full_sec",
+            "top_k": "top_k",
+            "topk": "top_k",
+            "top_k_full": "top_k_full",
+            "topk_full": "top_k_full",
+            "history": "history_window",
+            "history_window": "history_window",
+            "history_full": "history_window_full",
+            "history_window_full": "history_window_full",
+        }
+        parsed: dict[str, float | int] = {}
+        tokens = [tok.strip() for tok in text.split() if tok.strip()]
+        if not tokens:
+            return parsed, "未提供参数"
+        for token in tokens:
+            if "=" not in token:
+                return {}, f"参数格式错误：{token}（应为 key=value）"
+            key_raw, value_raw = token.split("=", 1)
+            key = aliases.get(key_raw.strip().lower())
+            if not key:
+                return {}, f"不支持的参数：{key_raw}"
+            value_text = value_raw.strip()
+            if key in {"timeout_sec", "timeout_full_sec"}:
+                try:
+                    value = float(value_text)
+                except Exception:
+                    return {}, f"{key_raw} 需要数字"
+                if value <= 0:
+                    return {}, f"{key_raw} 必须 > 0"
+                parsed[key] = value
+            else:
+                try:
+                    value = int(value_text)
+                except Exception:
+                    return {}, f"{key_raw} 需要正整数"
+                if value <= 0:
+                    return {}, f"{key_raw} 必须是正整数"
+                parsed[key] = value
+        return parsed, None
+
+    def _apply_memu_tune(self, overrides: dict[str, float | int]) -> tuple[bool, str]:
+        timeout_sec = overrides.get("timeout_sec")
+        timeout_full_sec = overrides.get("timeout_full_sec")
+
+        if isinstance(timeout_sec, (int, float)):
+            self.memu_retrieve_timeout_sec = max(0.05, float(timeout_sec))
+        if isinstance(timeout_full_sec, (int, float)):
+            self.memu_retrieve_timeout_full_sec = max(0.05, float(timeout_full_sec))
+
+        self.memu_retrieve_timeout_full_sec = max(
+            float(self.memu_retrieve_timeout_sec),
+            float(self.memu_retrieve_timeout_full_sec),
+        )
+
+        update_result = self.memory_adapter.update_retrieve_tuning(
+            top_k=int(overrides["top_k"]) if "top_k" in overrides else None,
+            top_k_full=int(overrides["top_k_full"]) if "top_k_full" in overrides else None,
+            history_window=int(overrides["history_window"]) if "history_window" in overrides else None,
+            history_window_full=int(overrides["history_window_full"]) if "history_window_full" in overrides else None,
+        )
+        if not update_result.get("ok"):
+            return False, str(update_result.get("error") or "unknown error")
+        return True, self._format_memu_tune()
+
     async def _handle_memu_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
         if not raw.startswith("/memu"):
@@ -694,9 +793,69 @@ class AgentLoop:
         if arg_lower in {"help", "?"}:
             content = (
                 "用法：/memu status [fast|full]\n"
-                "分类：/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>"
+                "分类：/memu category list | add <名称> [| 描述] | update <名称> | <新描述> | delete <名称>\n"
+                "调优：/memu tune [show] | speed | balanced | recall | set key=value ..."
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if arg_lower.startswith("tune"):
+            tune_arg = arg[4:].strip() if len(arg) >= 4 else ""
+            tune_lower = tune_arg.lower()
+            if not tune_arg or tune_lower in {"show", "status", "list"}:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=self._format_memu_tune())
+
+            presets: dict[str, dict[str, float | int]] = {
+                "speed": {
+                    "timeout_sec": 0.8,
+                    "timeout_full_sec": 2.0,
+                    "top_k": 4,
+                    "top_k_full": 10,
+                    "history_window": 3,
+                    "history_window_full": 8,
+                },
+                "balanced": {
+                    "timeout_sec": 1.2,
+                    "timeout_full_sec": 3.0,
+                    "top_k": 5,
+                    "top_k_full": 12,
+                    "history_window": 4,
+                    "history_window_full": 12,
+                },
+                "recall": {
+                    "timeout_sec": 1.8,
+                    "timeout_full_sec": 4.0,
+                    "top_k": 8,
+                    "top_k_full": 18,
+                    "history_window": 8,
+                    "history_window_full": 20,
+                },
+            }
+            if tune_lower in presets:
+                ok, result = self._apply_memu_tune(presets[tune_lower])
+                if not ok:
+                    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"调优失败：{result}")
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"已应用预设：{tune_lower}\n\n{result}",
+                )
+
+            set_arg = tune_arg
+            if tune_lower.startswith("set "):
+                set_arg = tune_arg[4:].strip()
+            elif tune_lower in {"set", "update"}:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="用法：/memu tune set timeout=1.2 timeout_full=3 top_k=5 top_k_full=12 history=4 history_full=12",
+                )
+            parsed, err = self._parse_memu_tune_overrides(set_arg)
+            if err:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"调优参数错误：{err}")
+            ok, result = self._apply_memu_tune(parsed)
+            if not ok:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"调优失败：{result}")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"已更新调优参数。\n\n{result}")
 
         if arg_lower.startswith("category"):
             sub_parts = arg.split(None, 2)
@@ -1594,6 +1753,7 @@ class AgentLoop:
                 "/model sub <模型名> | /model sub reset",
                 "/model clean",
                 "/memu status [fast|full]",
+                "/memu tune [show|speed|balanced|recall|set ...]",
                 "/memu category list | /memu category add <名称> [| 描述]",
                 "/memu category update <名称> | <新描述> | /memu category delete <名称>",
                 "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
@@ -1601,6 +1761,7 @@ class AgentLoop:
                 "/menu list",
                 "/menu model ...",
                 "/menu status [fast|full]",
+                "/menu tune ...",
                 "/menu category ...",
                 "/menu categories",
                 "/menu subtask ...",
@@ -1667,6 +1828,16 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return await self._handle_memu_command(forwarded)
+        if arg_lower.startswith("tune"):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu " + arg_raw,
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
         if arg_lower in {"version", "ver"}:
             forwarded = InboundMessage(
                 channel=msg.channel,
@@ -1687,6 +1858,7 @@ class AgentLoop:
             "/menu model sub <模型名> | /menu model sub reset",
             "/menu model clean",
             "/menu status [fast|full]",
+            "/menu tune [show|speed|balanced|recall|set ...]",
             "/menu category list | /menu category add <名称> [| 描述]",
             "/menu category update <名称> | <新描述> | /menu category delete <名称>",
             "/menu categories (显示所有分类与描述)",
@@ -1927,15 +2099,13 @@ class AgentLoop:
             try:
                 memu_start = time.perf_counter()
                 full_retrieve = self.memory_adapter.should_force_full_retrieve(msg.content or "")
-                retrieve_timeout_sec = self.memu_retrieve_timeout_sec
                 if full_retrieve:
-                    try:
-                        retrieve_timeout_sec = max(
-                            retrieve_timeout_sec,
-                            float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC_FULL", "3.0")),
-                        )
-                    except Exception:
-                        retrieve_timeout_sec = max(retrieve_timeout_sec, 3.0)
+                    retrieve_timeout_sec = max(
+                        float(self.memu_retrieve_timeout_sec),
+                        float(self.memu_retrieve_timeout_full_sec),
+                    )
+                else:
+                    retrieve_timeout_sec = float(self.memu_retrieve_timeout_sec)
                 retrieve_coro = self.memory_adapter.retrieve_context(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
