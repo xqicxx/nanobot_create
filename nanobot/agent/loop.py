@@ -1828,6 +1828,46 @@ class AgentLoop:
         content += f"\nGit：{commit}"
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
+    def _format_system_list(self) -> str:
+        lines = [
+            "系统命令：",
+            "/system list - 显示系统命令总览",
+            "/menu list - 菜单命令总览",
+            "/menu all - 全量命令（含分类）",
+            "/menu status [fast|full] - MemU 状态",
+            "/menu tune [show|speed|balanced|recall|set ...] - MemU 调优",
+            "/menu category list|add|update|delete - 分类配置",
+            "/menu subtask run|list|recent|<id>|clear - 子任务管理（路由到 /subtask）",
+            "/menu restart now - 重启 agent 进程",
+            "/menu version - 版本信息",
+            "",
+            "子任务命令：",
+            "/subtask list - 查看运行中/最近完成",
+            "/subtask recent - 最近完成列表",
+            "/subtask <id> - 查看任务详情",
+            "/subtask run [-m <模型>] <任务> - 手动创建子任务",
+            "/subtask clear - 清理历史记录",
+        ]
+        return "\n".join(lines)
+
+    async def _handle_system_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        raw = (msg.content or "").strip()
+        if not raw.startswith("/system"):
+            return None
+        parts = raw.split(None, 1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else "list"
+        if arg in {"help", "?", "ls", "list"}:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_system_list(),
+            )
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="用法：/system list",
+        )
+
     async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
         if not raw.startswith("/menu"):
@@ -1876,6 +1916,7 @@ class AgentLoop:
                 "/memu category update <名称> | <新描述> | /memu category delete <名称>",
                 "/subtask run [-m <模型>] <任务> | /subtask list | /subtask recent | /subtask <id> | /subtask clear",
                 "/version",
+                "/system list",
                 "/menu list",
                 "/menu model ...",
                 "/menu status [fast|full]",
@@ -1972,6 +2013,7 @@ class AgentLoop:
             "可用 /menu 子命令：",
             "/menu list",
             "/menu all",
+            "/system list",
             "/menu model list | /menu model <模型名> | /menu model reset",
             "/menu model sub <模型名> | /menu model sub reset",
             "/menu model clean",
@@ -2072,6 +2114,15 @@ class AgentLoop:
 
         # Reset per-turn spawn tracking early
         self._spawned_this_turn = []
+
+        # Handle /system command before LLM
+        system_response = await self._handle_system_command(msg)
+        if system_response:
+            session = self.sessions.get_or_create(msg.session_key)
+            session.add_message("user", msg.content)
+            session.add_message("assistant", system_response.content)
+            self.sessions.save(session)
+            return system_response
 
         # Handle /version command before LLM
         menu_response = await self._handle_menu_command(msg)
