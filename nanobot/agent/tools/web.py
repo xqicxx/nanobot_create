@@ -54,7 +54,18 @@ class _MiniMaxMCPClient:
 
     def __init__(self, api_key: str, api_host: str, timeout: float = DEFAULT_MINIMAX_TIMEOUT):
         self.api_key = api_key.strip()
-        self.api_host = api_host.rstrip("/")
+        host = (api_host or "").strip().rstrip("/")
+        if host.endswith("/v1"):
+            host = host[:-3]
+        self.api_host = host or DEFAULT_MINIMAX_MCP_HOST
+        # Smart fallback: users often set LLM host (minimaxi.com/v1) instead of MCP host.
+        self._host_candidates = [self.api_host]
+        if (
+            "minimax.chat" not in self.api_host
+            and "minimax" in self.api_host
+            and DEFAULT_MINIMAX_MCP_HOST not in self._host_candidates
+        ):
+            self._host_candidates.append(DEFAULT_MINIMAX_MCP_HOST)
         self.timeout = timeout
 
     @property
@@ -79,18 +90,26 @@ class _MiniMaxMCPClient:
             "MM-API-Source": "Minimax-MCP",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.api_host}{endpoint}", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-
-        base_resp = data.get("base_resp") if isinstance(data, dict) else None
-        if isinstance(base_resp, dict):
-            status_code = base_resp.get("status_code")
-            if status_code not in (None, 0):
-                status_msg = base_resp.get("status_msg", "unknown")
-                raise RuntimeError(f"MiniMax MCP API error: {status_code} - {status_msg}")
-        return data
+        last_exc: Exception | None = None
+        for host in self._host_candidates:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(f"{host}{endpoint}", headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                base_resp = data.get("base_resp") if isinstance(data, dict) else None
+                if isinstance(base_resp, dict):
+                    status_code = base_resp.get("status_code")
+                    if status_code not in (None, 0):
+                        status_msg = base_resp.get("status_msg", "unknown")
+                        raise RuntimeError(f"MiniMax MCP API error: {status_code} - {status_msg}")
+                return data
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("MiniMax MCP request failed")
 
     async def _to_data_url(self, image_source: str) -> str:
         source = (image_source or "").strip()

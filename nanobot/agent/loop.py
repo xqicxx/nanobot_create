@@ -72,7 +72,48 @@ class _StreamBuffer:
         loop = asyncio.get_running_loop()
         self._flush_task = loop.create_task(self._flush(force=False))
 
-    def _find_split_index(self, *, force: bool) -> int:
+    def _collect_break_positions(self, text: str, limit: int) -> tuple[list[int], list[int]]:
+        hard: list[int] = []
+        soft: list[int] = []
+        i = 0
+        while i < limit:
+            ch = text[i]
+            if ch == "\n":
+                # Prefer paragraph boundaries first.
+                if i + 1 < limit and text[i + 1] == "\n":
+                    hard.append(i + 2)
+                    i += 1
+                else:
+                    soft.append(i + 1)
+            elif ch in "。！？!?":
+                j = i + 1
+                while j < limit and text[j] in ' "\'”’）】)]':
+                    j += 1
+                hard.append(j)
+            elif ch == ".":
+                prev_ch = text[i - 1] if i > 0 else ""
+                next_ch = text[i + 1] if i + 1 < len(text) else ""
+                # Keep decimal numbers together: e.g. 3.14
+                if prev_ch.isdigit() and next_ch.isdigit():
+                    i += 1
+                    continue
+                if i + 1 >= limit or next_ch.isspace() or next_ch in "\"'”’)]}】）":
+                    j = i + 1
+                    while j < limit and text[j] in ' "\'”’）】)]':
+                        j += 1
+                    hard.append(j)
+            elif ch in "，,；;：:、":
+                soft.append(i + 1)
+            elif ch.isspace():
+                soft.append(i + 1)
+            i += 1
+        return hard, soft
+
+    def _short_hard_break_min(self) -> int:
+        # Allow sentence-level streaming once min_interval is satisfied.
+        return 20 if not self._sent_any else 28
+
+    def _find_split_index(self, *, force: bool, allow_short_hard_break: bool = False) -> int:
         if not self._buffer:
             return 0
         min_required = self._first_chunk_min if not self._sent_any else self._min_chunk
@@ -81,16 +122,21 @@ class _StreamBuffer:
         if not force and len(self._buffer) < min_required:
             return 0
 
-        sentence_marks = "\n。！？.!?；;"
-        for i in range(limit - 1, -1, -1):
-            ch = self._buffer[i]
-            if ch in sentence_marks and (force or (i + 1) >= min_required):
-                return i + 1
+        hard_breaks, soft_breaks = self._collect_break_positions(self._buffer, limit)
+        short_floor = self._short_hard_break_min()
+        for pos in reversed(hard_breaks):
+            if force or pos >= min_required or (allow_short_hard_break and pos >= short_floor):
+                return pos
+
+        # Avoid mid-sentence split unless we hit chunk limit or force flush.
+        if not force and len(self._buffer) < chunk_limit:
+            return 0
+
+        for pos in reversed(soft_breaks):
+            if force or pos >= min_required:
+                return pos
 
         if len(self._buffer) >= chunk_limit:
-            for i in range(limit - 1, -1, -1):
-                if self._buffer[i].isspace() and (force or (i + 1) >= min_required):
-                    return i + 1
             return limit
 
         if force:
@@ -102,15 +148,19 @@ class _StreamBuffer:
             now = time.monotonic()
             min_required = self._first_chunk_min if not self._sent_any else self._min_chunk
             interval_required = 0.2 if not self._sent_any else self._min_interval
+            elapsed = now - self._last_flush
             if (
                 not force
                 and len(self._buffer) < min_required
-                and (now - self._last_flush) < interval_required
+                and elapsed < interval_required
             ):
                 return
 
             while self._buffer:
-                split_idx = self._find_split_index(force=force)
+                split_idx = self._find_split_index(
+                    force=force,
+                    allow_short_hard_break=(not force and elapsed >= interval_required),
+                )
                 if split_idx <= 0:
                     break
                 chunk = self._buffer[:split_idx]
@@ -129,6 +179,7 @@ class _StreamBuffer:
                 )
                 self._sent_any = True
                 self._last_flush = time.monotonic()
+                elapsed = 0.0
                 if not force:
                     break
 
@@ -334,6 +385,14 @@ class AgentLoop:
                 minimax_api_host=minimax_mcp_host,
                 timeout=minimax_mcp_timeout,
             ))
+        logger.info(
+            "MiniMax MCP tools: enabled={} key_set={} web={} image={} host={}",
+            minimax_mcp_enabled,
+            bool(minimax_mcp_key),
+            minimax_web_enabled,
+            minimax_image_enabled,
+            minimax_mcp_host,
+        )
         
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
@@ -1341,6 +1400,9 @@ class AgentLoop:
         lowered = source.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
             return True
+        path = Path(source).expanduser()
+        if path.exists() and path.is_file():
+            return True
         return Path(source).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
 
     def _collect_image_sources(self, msg: InboundMessage) -> list[str]:
@@ -1349,6 +1411,18 @@ class AgentLoop:
         for src in msg.media or []:
             if isinstance(src, str) and self._is_supported_image_source(src, media_type):
                 images.append(src)
+        if not images:
+            text = msg.content or ""
+            for pattern in (
+                r"\[(?:Image|图片)\s*:\s*([^\]\n]+)\]",
+                r"\[(?:Image|图片)\]\s*([/A-Za-z0-9_.\-~]+)",
+            ):
+                for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                    candidate = str(match).strip()
+                    if self._is_supported_image_source(candidate, "image"):
+                        images.append(candidate)
+                if images:
+                    break
         return images[:2]
 
     def _build_image_analysis_prompt(self, user_text: str) -> str:
@@ -1367,6 +1441,11 @@ class AgentLoop:
 
         tool = self.tools.get("understand_image")
         if not isinstance(tool, UnderstandImageTool) or not tool.is_configured():
+            logger.warning(
+                "Image received but understand_image tool unavailable (channel={}, sender={})",
+                msg.channel,
+                msg.sender_id,
+            )
             return msg.content, msg.media if msg.media else None
 
         prompt = self._build_image_analysis_prompt(msg.content or "")
