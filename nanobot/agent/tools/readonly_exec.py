@@ -90,36 +90,20 @@ class ReadOnlyExecTool(Tool):
             # Allow sensitive path matches if the command stays within the workspace,
             # but always block explicit sensitive keywords.
             if has_sensitive_keywords(command):
-                return await self._delegate(
-                    command,
-                    "由于涉及敏感关键词，为了安全，我将启动子任务进行受限访问。",
-                )
+                return "Error: 命令包含敏感关键词，已被拦截。"
             if has_sensitive_paths(command):
                 if self._default_cwd and self._default_cwd in command:
                     pass
                 else:
-                    return await self._delegate(
-                        command,
-                        "由于涉及敏感路径，为了安全，我将启动子任务进行受限访问。",
-                    )
+                    return "Error: 命令涉及敏感路径，已被拦截。"
 
         if check.dangerous_syntax:
-            return await self._delegate(
-                command,
-                "命令包含危险语法，已改为子任务执行。",
-            )
+            return "Error: 命令包含危险语法，已被拦截。"
 
         if not check.readonly_allowed:
-            return await self._delegate(
-                command,
-                "命令不在只读白名单，已改为子任务执行。",
-            )
+            return "Error: 命令不在允许列表中，已被拦截。"
 
         return await self._runner.execute(command=command, working_dir=working_dir)
 
     async def _delegate(self, command: str, notice: str) -> str:
-        if not self._spawn_cb:
-            return f"Error: {notice}（但子任务不可用）"
-        task = f"{notice}\n执行命令：{command}"
-        await self._spawn_cb(task, "exec", self._origin_channel, self._origin_chat_id)
-        return notice
+        return f"Error: {notice}"

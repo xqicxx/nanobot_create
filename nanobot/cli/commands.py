@@ -372,7 +372,7 @@ def gateway(
     config = load_config()
     stream_enabled = bool(config.agents.stream.enabled and "cli" in config.agents.stream.channels)
 
-    # Prevent multiple gateway instances (causes duplicate replies and mismatched subtask state)
+    # Prevent multiple gateway instances (causes duplicate replies)
     lock_path = get_data_dir() / "gateway.lock"
     if lock_path.exists():
         try:
@@ -406,8 +406,6 @@ def gateway(
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
-        subtask_model=config.agents.subtask.model,
-        subtask_timeout=config.agents.subtask.timeout_seconds,
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         minimax_mcp_config=config.tools.mcp.minimax,
@@ -522,8 +520,6 @@ def agent(
         minimax_api_key=config.providers.minimax.api_key or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
-        subtask_model=config.agents.subtask.model,
-        subtask_timeout=config.agents.subtask.timeout_seconds,
         memu_config=config.memu,
         stream_config=config.agents.stream,
     )
