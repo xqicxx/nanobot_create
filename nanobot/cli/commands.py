@@ -502,6 +502,7 @@ def agent(
     from loguru import logger
     
     config = load_config()
+    stream_enabled = bool(getattr(config.agents.stream, "enabled", False))
     
     bus = MessageBus()
     provider = _make_provider(config)
