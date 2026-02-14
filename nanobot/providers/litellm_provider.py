@@ -203,6 +203,11 @@ class LiteLLMProvider(LLMProvider):
                         if on_token:
                             on_token(piece)
 
+                if spec.name == "stepfun":
+                    delta_reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+                    if delta_reasoning:
+                        reasoning_parts.append(str(delta_reasoning))
+
                 if spec.name == "minimax":
                     delta_reasoning = getattr(delta, "reasoning_details", None)
                     if delta_reasoning:
@@ -257,7 +262,11 @@ class LiteLLMProvider(LLMProvider):
                         )
                     )
 
-            reasoning_text = reasoning_seen or ("".join(reasoning_parts) if reasoning_parts else None)
+            reasoning_text: str | None
+            if spec.name == "minimax":
+                reasoning_text = reasoning_seen or ("".join(reasoning_parts) if reasoning_parts else None)
+            else:
+                reasoning_text = "".join(reasoning_parts) if reasoning_parts else None
             return LLMResponse(
                 content="".join(content_parts) if content_parts else None,
                 tool_calls=tool_calls,
@@ -443,7 +452,7 @@ class LiteLLMProvider(LLMProvider):
                 "total_tokens": response.usage.total_tokens,
             }
         
-        reasoning_content = getattr(message, "reasoning_content", None)
+        reasoning_content = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
         
         return LLMResponse(
             content=message.content,

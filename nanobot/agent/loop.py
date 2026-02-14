@@ -332,8 +332,8 @@ class AgentLoop:
         self.stream_enabled = bool(getattr(stream_config, "enabled", False)) if stream_config is not None else False
         stream_channels = getattr(stream_config, "channels", []) if stream_config is not None else []
         self.stream_channels = {c for c in stream_channels if isinstance(c, str)}
-        # Disable bot-side chunk pushing by default; keep provider streaming for latency.
-        self.stream_push_enabled = bool(getattr(stream_config, "push_enabled", False)) if stream_config is not None else False
+        # Disable bot-side chunk pushing; use provider-native streaming instead.
+        self.stream_push_enabled = False
         try:
             self.memu_retrieve_timeout_sec = max(0.0, float(os.getenv("NANOBOT_MEMU_RETRIEVE_TIMEOUT_SEC", "1.2")))
         except Exception:
@@ -516,26 +516,7 @@ class AgentLoop:
                 
                 # Process it
                 try:
-                    stream_buffer: _StreamBuffer | None = None
-                    think_filter: _ThinkTagFilter | None = None
-                    stream_callback: Callable[[str], None] | None = None
-                    if self.stream_push_enabled and self._should_stream_channel(msg.channel) and msg.channel != "cli":
-                        stream_buffer = _StreamBuffer(
-                            bus=self.bus,
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                        )
-                        think_filter = _ThinkTagFilter(emit_callback=stream_buffer.on_token)
-                        stream_callback = think_filter.feed
-
-                    response = await self._process_message(msg, stream_callback=stream_callback)
-
-                    if stream_buffer is not None:
-                        if think_filter is not None:
-                            think_filter.finish()
-                        await stream_buffer.finish()
-                        if stream_buffer.sent_any:
-                            continue
+                    response = await self._process_message(msg, stream_callback=None)
 
                     if response:
                         await self.bus.publish_outbound(response)
@@ -1285,9 +1266,16 @@ class AgentLoop:
         lowered = model.strip().lower()
         return lowered.startswith("minimax/") or lowered.startswith("minimax-") or lowered == "minimax"
 
+    @staticmethod
+    def _is_stepfun_model(model: str | None) -> bool:
+        if not model:
+            return False
+        lowered = model.strip().lower()
+        return lowered.startswith("stepfun/") or lowered.startswith("step-") or lowered == "stepfun" or lowered == "step"
+
     def _should_stream(self, channel: str | None, stream_callback: Any | None, *, model: str | None = None) -> bool:
-        # MiniMax: always use provider-native streaming API, even if we don't emit chunk messages.
-        if self._is_minimax_model(model):
+        # Use provider-native streaming API for StepFun/MiniMax even if outbound chunk pushing is disabled.
+        if self._is_minimax_model(model) or self._is_stepfun_model(model):
             return True
         if not stream_callback:
             return False
