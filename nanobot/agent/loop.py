@@ -1483,13 +1483,14 @@ class AgentLoop:
         ]
 
     def _menu_base_command_specs(self) -> list[tuple[str, str]]:
-        """扩展菜单命令 - 高级功能"""
+        """菜单命令"""
         return [
+            ("/menu help", "显示此帮助信息"),
+            ("/menu list", "显示记忆内容"),
             ("/menu all", "显示所有可用命令"),
             ("/menu categories", "显示记忆分类"),
             ("/menu restart now", "重启 nanobot 进程"),
             ("/menu version", "显示版本信息"),
-            ("/menu help", "显示菜单帮助"),
         ]
 
     @staticmethod
@@ -1598,7 +1599,7 @@ class AgentLoop:
         lines.append("【路由命令】")
         lines.extend(self._format_command_lines(self._menu_routed_command_specs()))
         lines.append("")
-        lines.append("💡 提示：/system 查看系统命令")
+        lines.append("💡 提示：/system 查看系统命令，/menu all 查看完整列表")
         return "\n".join(lines)
 
     def _format_system_list(self) -> str:
@@ -1814,7 +1815,7 @@ class AgentLoop:
         )
 
     async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
-        """处理 /menu 命令 - 默认显示帮助"""
+        """处理 /menu 命令"""
         raw = (msg.content or "").strip()
         if not raw.startswith("/menu"):
             return None
@@ -1824,12 +1825,31 @@ class AgentLoop:
         arg_lower = arg_raw.lower()
         
         # 帮助信息（默认）
-        if arg_lower in {"help", "?", "", "list", "ls"}:
+        if arg_lower in {"help", "?", ""}:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self._format_menu_list(),
             )
+        
+        # 显示记忆内容
+        if arg_lower in {"list", "ls"}:
+            items = await self.memory_adapter.query_items(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                limit=20,
+            )
+            if not items:
+                content = "暂无记忆内容。"
+            else:
+                lines = ["📋 记忆内容："]
+                for idx, item in enumerate(items, start=1):
+                    content_text = item.get("content", "")[:200]
+                    memory_type = item.get("memory_type", "unknown")
+                    lines.append(f"{idx}. [{memory_type}] {content_text}")
+                content = "\n".join(lines)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
         
         if arg_lower.startswith("restart"):
             restart_parts = arg_raw.split(None, 1)
