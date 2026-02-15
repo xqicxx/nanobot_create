@@ -1606,6 +1606,25 @@ class AgentLoop:
             content="用法：/system list",
         )
 
+    async def _handle_new_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Handle /new command to start a fresh conversation."""
+        raw = (msg.content or "").strip()
+        if not raw.startswith("/new"):
+            return None
+        
+        # Delete the current session to start fresh
+        deleted = self.sessions.delete(msg.session_key)
+        
+        content = "🆕 已开启新对话，历史记录已清空。"
+        if not deleted:
+            content += "\n（当前没有历史记录）"
+        
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+        )
+
     async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
         raw = (msg.content or "").strip()
         if not raw.startswith("/menu"):
@@ -1838,6 +1857,11 @@ class AgentLoop:
             session.add_message("assistant", system_response.content)
             self.sessions.save(session)
             return system_response
+
+        # Handle /new command before LLM
+        new_response = await self._handle_new_command(msg)
+        if new_response:
+            return new_response
 
         # Handle /version command before LLM
         menu_response = await self._handle_menu_command(msg)
