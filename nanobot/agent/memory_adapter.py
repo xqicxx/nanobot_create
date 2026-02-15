@@ -236,6 +236,10 @@ class MemoryAdapter:
         try:
             # Note: memu-py 0.1.7 doesn't support custom embedding models well
             # Disable embeddings for now to avoid API errors
+            # Remove embedding env vars to prevent RecallAgent from initializing embedding client
+            for key in ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_EMBED_MODEL"]:
+                os.environ.pop(key, None)
+            
             self._memory_agent = MemoryAgent(
                 llm_client,
                 memory_dir=memory_dir,
