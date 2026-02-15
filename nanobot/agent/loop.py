@@ -614,10 +614,15 @@ class AgentLoop:
     def _format_memu_status(self, status: dict[str, Any], run_checks: bool) -> str:
         lines: list[str] = []
         enabled = status.get("enabled", False)
+        agent_initialized = status.get("memory_agent_initialized", False)
         lines.append(f"MemU: {'启用' if enabled else '禁用'}")
         if not enabled:
             lines.append("用法：/memu status")
             return "\n".join(lines)
+        
+        # Show agent initialization status
+        if not agent_initialized:
+            lines.append("⚠️ MemoryAgent 未初始化，使用文件存储模式")
 
         llm = status.get("llm", {}) or {}
         embedding = status.get("embedding", {}) or {}

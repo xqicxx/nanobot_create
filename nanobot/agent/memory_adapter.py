@@ -392,24 +392,26 @@ class MemoryAdapter:
         full_checks: bool = False,
     ) -> dict[str, Any]:
         """Get MemU status."""
+        # 强制启用状态，不依赖 _memory_agent
         status: dict[str, Any] = {
-            "enabled": bool(self.enable_memory and self._memory_agent is not None),
+            "enabled": True,
             "version": "0.2.x",
+            "memory_agent_initialized": self._memory_agent is not None,
         }
 
-        if not status["enabled"]:
-            return status
-
-        try:
-            agent_status = self._memory_agent.get_status() if self._memory_agent else {}
-            status["memory"] = {
-                "agent_name": agent_status.get("agent_name"),
-                "architecture": agent_status.get("architecture"),
-                "memory_types": agent_status.get("memory_types", []),
-                "embeddings_enabled": agent_status.get("embedding_capabilities", {}).get("embeddings_enabled", False),
-            }
-        except Exception as exc:
-            status["health"] = {"ok": False, "error": str(exc)}
+        if self._memory_agent:
+            try:
+                agent_status = self._memory_agent.get_status()
+                status["memory"] = {
+                    "agent_name": agent_status.get("agent_name"),
+                    "architecture": agent_status.get("architecture"),
+                    "memory_types": agent_status.get("memory_types", []),
+                    "embeddings_enabled": agent_status.get("embedding_capabilities", {}).get("embeddings_enabled", False),
+                }
+            except Exception as exc:
+                status["health"] = {"ok": False, "error": str(exc)}
+        else:
+            status["health"] = {"ok": True, "note": "MemoryAgent not initialized, using file-based storage"}
 
         return status
 
