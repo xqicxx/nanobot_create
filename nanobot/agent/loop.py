@@ -1762,13 +1762,21 @@ class AgentLoop:
         if not raw.startswith("/new"):
             return None
         
+        # Check if MemU is enabled first
+        if not self.memory_adapter or not self.memory_adapter.enable_memory:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="⚠️ MemU 记忆功能未启用，无法归档对话。\n🆕 已开启新对话（无归档）！",
+            )
+        
         # Get current session
         session = self.sessions.get_or_create(msg.session_key)
         history = session.get_history()
         archived_count = len(history) // 2  # Rough count of user-assistant pairs
         
         # Archive to MemU if there's content to save
-        if len(history) > 2 and self.memory_adapter and self.memory_adapter.enable_memory:
+        if len(history) > 2:
             try:
                 # Build conversation text
                 conversation_text = []
