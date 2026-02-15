@@ -61,9 +61,8 @@ class MemoryAdapter:
             self.retrieve_history_window,
             int(os.getenv("NANOBOT_MEMU_HISTORY_WINDOW_FULL", "12")),
         )
-        if memu_config is not None and not memu_config.enabled:
-            enable_memory = False
-        self.enable_memory = enable_memory
+        # 强制启用 MemU，不受配置影响
+        self.enable_memory = True
         self.resources_dir = ensure_dir(resources_dir or (workspace / ".memu" / "resources"))
         self.memu_config = memu_config
         self._memory_agent = memu_service

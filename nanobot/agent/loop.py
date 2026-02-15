@@ -338,12 +338,14 @@ class AgentLoop:
             self.memu_retrieve_timeout_full_sec = max(self.memu_retrieve_timeout_sec, 3.0)
         
         self.context = ContextBuilder(workspace)
+        # MemU 始终启用，不受配置影响
         memu_enabled = True
         if memu_config is not None:
-            memu_enabled = bool(getattr(memu_config, "enabled", True))
+            # 强制启用，忽略配置文件中的 enabled 设置
+            memu_config.enabled = True
         self.memory_adapter = memory_adapter or MemoryAdapter(
             workspace=workspace,
-            enable_memory=memu_enabled,
+            enable_memory=True,
             memu_config=memu_config,
         )
         self.sessions = session_manager or SessionManager(workspace)
