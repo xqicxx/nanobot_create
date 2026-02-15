@@ -123,21 +123,36 @@ class MemoryAdapter:
         base_url = getattr(default_cfg, "base_url", "") or "https://api.deepseek.com/v1"
         chat_model = getattr(default_cfg, "chat_model", "deepseek-chat")
 
+        # Validate API key before creating client
+        if not api_key or api_key == "your-deepseek-api-key" or len(api_key) < 20:
+            logger.error(
+                "❌ INVALID DeepSeek API KEY! "
+                "Please check your config at ~/.nanobot/config.json\n"
+                "   Current key: {}...\n"
+                "   Get a valid key from: https://platform.deepseek.com/",
+                api_key[:10] if api_key else "EMPTY"
+            )
+            return None
+        
         try:
             if provider == "deepseek" or "deepseek" in base_url.lower():
-                return DeepSeekClient(
+                client = DeepSeekClient(
                     api_key=api_key,
                     endpoint=base_url,
                     model_name=chat_model,
                 )
+                logger.info(f"✅ DeepSeek LLM client created (model: {chat_model})")
+                return client
             else:
-                return OpenAIClient(
+                client = OpenAIClient(
                     api_key=api_key,
                     base_url=base_url,
                     model=chat_model,
                 )
+                logger.info(f"✅ OpenAI LLM client created (model: {chat_model})")
+                return client
         except Exception as exc:
-            logger.error(f"Failed to create LLM client: {exc}")
+            logger.error(f"❌ Failed to create LLM client: {exc}")
             return None
 
     def _setup_embedding_env(self) -> None:
@@ -299,12 +314,26 @@ class MemoryAdapter:
             )
             elapsed_ms = int(round((time.perf_counter() - start) * 1000))
             
-            if result.get("success"):
+            # Check if any function calls were made (indicates successful processing)
+            function_calls = result.get("function_calls", [])
+            
+            if result.get("success") and function_calls:
                 logger.info(
-                    "MemU memorize in {}ms (channel={}, sender={})",
+                    "MemU memorize in {}ms (channel={}, sender={}) - {} actions",
                     elapsed_ms,
                     channel,
                     sender_id,
+                    len(function_calls),
+                )
+            elif result.get("success") and not function_calls:
+                # LLM call succeeded but no actions taken - likely API/auth issue
+                error_msg = result.get("error", "Unknown error")
+                logger.error(
+                    "MemU memorize API ERROR (channel={}, sender={}): {}. "
+                    "Check your DeepSeek API key configuration!",
+                    channel,
+                    sender_id,
+                    error_msg,
                 )
             else:
                 logger.warning(f"MemU memorize failed: {result.get('error')}")
