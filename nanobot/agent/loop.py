@@ -1483,12 +1483,14 @@ class AgentLoop:
         ]
 
     def _menu_base_command_specs(self) -> list[tuple[str, str]]:
-        """菜单命令"""
+        """菜单命令（MemU 记忆系统）"""
         return [
             ("/menu help", "显示此帮助信息"),
             ("/menu list", "显示记忆内容"),
             ("/menu all", "显示所有可用命令"),
             ("/menu categories", "显示记忆分类"),
+            ("/menu status", "查看 MemU 状态"),
+            ("/menu tune", "MemU 调优"),
             ("/menu restart now", "重启 nanobot 进程"),
             ("/menu version", "显示版本信息"),
         ]
@@ -1535,8 +1537,9 @@ class AgentLoop:
         return self._dedupe_command_specs(specs)
 
     def _menu_command_specs(self) -> list[tuple[str, str]]:
+        """菜单命令（包含 MemU 功能）"""
         return self._dedupe_command_specs(
-            [*self._menu_base_command_specs(), *self._menu_routed_command_specs()]
+            [*self._menu_base_command_specs(), *self._menu_routed_command_specs(), *self._memu_command_specs()]
         )
 
     def _model_command_specs(self) -> list[tuple[str, str]]:
@@ -1563,11 +1566,11 @@ class AgentLoop:
         ]
 
     def _command_sections(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        # MemU 命令已集成到菜单命令中
         return [
             ("系统命令", self._system_command_specs()),
-            ("菜单命令", self._menu_command_specs()),
+            ("菜单命令 (MemU)", self._menu_command_specs()),
             ("模型命令", self._model_command_specs()),
-            ("MemU 命令", self._memu_command_specs()),
             ("其他命令", self._misc_command_specs()),
         ]
 
@@ -1903,8 +1906,17 @@ class AgentLoop:
             session = self.sessions.get_or_create(msg.session_key)
             current_model = self._get_session_model(session)
             return self._handle_model_command(forwarded, session, current_model)
-        # MemU 命令独立，不通过 /menu 路由
-        # 用户应该直接使用 /memu status, /memu tune 等命令
+        # MemU 命令集成到 /menu
+        if arg_lower.startswith("status") or arg_lower.startswith("tune"):
+            forwarded = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content="/memu " + arg_raw,
+                media=msg.media,
+                metadata=msg.metadata,
+            )
+            return await self._handle_memu_command(forwarded)
         if arg_lower in {"version", "ver"}:
             forwarded = InboundMessage(
                 channel=msg.channel,
