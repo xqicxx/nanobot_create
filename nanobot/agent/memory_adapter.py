@@ -235,13 +235,9 @@ class MemoryAdapter:
                 llm_client,
                 memory_dir=memory_dir,
                 enable_embeddings=True,
-                agent_id="nanobot",
-                user_id="default",
             )
             self._recall_agent = RecallAgent(
                 memory_dir=memory_dir,
-                agent_id="nanobot",
-                user_id="default",
             )
             logger.info("MemU agents initialized successfully")
         except Exception as exc:
