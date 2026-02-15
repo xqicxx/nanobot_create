@@ -183,17 +183,58 @@ class MemoryAdapter:
         current_message: str,
         full_retrieve: bool = False,
     ) -> MemoryContext:
-        """Retrieve memory context for the current conversation.
+        """Retrieve memory context from files.
         
-        Note: In memu-py 0.2.x, retrieval is done automatically during run().
-        This method is kept for API compatibility but returns empty context.
+        In memu-py 0.2.x, memories are stored as markdown files.
+        This method reads the memory files directly.
         """
         if not self.enable_memory or self._memory_agent is None:
             return MemoryContext(text="")
         
-        # In memu-py 0.2.x, memory is retrieved automatically during conversation processing
-        # We don't have direct access to retrieval API anymore
-        return MemoryContext(text="")
+        if self.should_skip_retrieve(current_message):
+            return MemoryContext(text="")
+        
+        try:
+            # Build user path (memu-py 0.2.x uses agent_id/user_id structure)
+            user_id = self.build_user_id(channel, chat_id, sender_id)
+            memory_dir = self.workspace / ".memu" / "memory"
+            user_memory_dir = memory_dir / "nanobot" / user_id
+            
+            if not user_memory_dir.exists():
+                return MemoryContext(text="")
+            
+            # Read all memory files
+            memories = []
+            memory_files = {
+                "profile": "个人档案",
+                "event": "重要事件", 
+                "reminder": "提醒事项",
+                "interest": "兴趣爱好",
+                "study": "学习记录",
+                "activity": "活动记录"
+            }
+            
+            for category, label in memory_files.items():
+                file_path = user_memory_dir / f"{category}.md"
+                if file_path.exists():
+                    content = file_path.read_text(encoding="utf-8").strip()
+                    if content and len(content) > 10:  # Filter out empty/short content
+                        # Extract first few lines as summary
+                        lines = [line.strip() for line in content.split("\n") if line.strip()]
+                        if lines:
+                            summary = "; ".join(lines[:3])  # First 3 lines
+                            memories.append(f"[{label}] {summary}")
+            
+            if not memories:
+                return MemoryContext(text="")
+            
+            # Format as context
+            context_text = "# 历史记忆\n" + "\n".join(f"- {m}" for m in memories[:self.retrieve_top_k])
+            return MemoryContext(text=context_text)
+            
+        except Exception as exc:
+            logger.warning(f"Failed to retrieve memory context: {exc}")
+            return MemoryContext(text="")
 
     async def memorize_turn(
         self,
