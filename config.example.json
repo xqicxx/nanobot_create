@@ -1,0 +1,67 @@
+# Nanobot Configuration Example
+# Copy this file to ~/.nanobot/config.json and customize the values
+
+{
+  "agents": {
+    "defaults": {
+      "model": "minimax/MiniMax-M2.1",
+      "maxToolIterations": 10
+    },
+    "stream": {
+      "enabled": true,
+      "channels": ["cli", "whatsapp"]
+    }
+  },
+  "providers": {
+    "minimax": {
+      "apiKey": "your-minimax-api-key",
+      "apiBase": "https://api.minimaxi.com/v1"
+    },
+    "stepfun": {
+      "apiKey": "your-stepfun-api-key",
+      "apiBase": "https://api.stepfun.com/v1"
+    }
+  },
+  "channels": {
+    "whatsapp": {
+      "enabled": true,
+      "bridgeUrl": "ws://localhost:3001",
+      "allowFrom": []
+    }
+  },
+  "memu": {
+    "enabled": true,
+    "default": {
+      "provider": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-your-deepseek-api-key",
+      "chatModel": "deepseek-chat",
+      "clientBackend": "sdk"
+    },
+    "embedding": {
+      "provider": "openai",
+      "baseUrl": "https://api.siliconflow.cn/v1",
+      "apiKey": "sk-your-siliconflow-api-key",
+      "embedModel": "BAAI/bge-m3",
+      "clientBackend": "sdk"
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "your-brave-api-key"
+      }
+    },
+    "mcp": {
+      "minimax": {
+        "enabled": true,
+        "apiKey": "your-minimax-api-key",
+        "apiHost": "https://api.minimaxi.com",
+        "timeoutSeconds": 15,
+        "enableWebSearch": true,
+        "enableImageUnderstanding": true
+      }
+    }
+  },
+  "workspace": "/root/.nanobot/workspace"
+}
