@@ -415,7 +415,51 @@ class MemoryAdapter:
         return status
 
     async def query_items(self, **kwargs) -> list[dict[str, Any]]:
-        return []
+        """Query memory items from files."""
+        if not self.enable_memory:
+            return []
+        
+        channel = kwargs.get("channel")
+        chat_id = kwargs.get("chat_id")
+        sender_id = kwargs.get("sender_id")
+        limit = kwargs.get("limit", 20)
+        
+        user_id = self.build_user_id(channel, chat_id, sender_id)
+        memory_dir = self.workspace / ".memu" / "memory"
+        user_memory_dir = memory_dir / "nanobot" / user_id
+        
+        if not user_memory_dir.exists():
+            # Try default user
+            user_memory_dir = memory_dir / "nanobot" / "default:unknown:system"
+        
+        if not user_memory_dir.exists():
+            return []
+        
+        items = []
+        memory_files = {
+            "profile": "个人档案",
+            "event": "重要事件",
+            "reminder": "提醒事项",
+            "interest": "兴趣爱好",
+            "study": "学习记录",
+            "activity": "活动记录"
+        }
+        
+        for category, label in memory_files.items():
+            file_path = user_memory_dir / f"{category}.md"
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding="utf-8").strip()
+                    if content:
+                        items.append({
+                            "content": content[:500],
+                            "memory_type": label,
+                            "category": category,
+                        })
+                except Exception:
+                    pass
+        
+        return items[:limit]
 
     async def query_categories(self, **kwargs) -> list[dict[str, Any]]:
         return []
