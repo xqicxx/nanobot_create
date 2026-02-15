@@ -188,7 +188,9 @@ class MemoryAdapter:
         In memu-py 0.2.x, memories are stored as markdown files.
         This method reads the memory files directly.
         """
-        if not self.enable_memory or self._memory_agent is None:
+        # Only check if memory is enabled, not if MemoryAgent is initialized
+        # We can read files even if MemoryAgent failed to initialize
+        if not self.enable_memory:
             return MemoryContext(text="")
         
         if self.should_skip_retrieve(current_message):
@@ -223,16 +225,33 @@ class MemoryAdapter:
                 "activity": "活动记录"
             }
             
-            for category, label in memory_files.items():
-                file_path = user_memory_dir / f"{category}.md"
-                if file_path.exists():
-                    content = file_path.read_text(encoding="utf-8").strip()
-                    if content and len(content) > 10:  # Filter out empty/short content
-                        # Extract first few lines as summary
-                        lines = [line.strip() for line in content.split("\n") if line.strip()]
-                        if lines:
-                            summary = "; ".join(lines[:3])  # First 3 lines
-                            memories.append(f"[{label}] {summary}")
+            # Try to use MemoryAgent's storage_manager if available
+            if self._memory_agent and hasattr(self._memory_agent, 'storage_manager'):
+                try:
+                    for category, label in memory_files.items():
+                        content = self._memory_agent.storage_manager.read_memory_file(category)
+                        if content and len(content) > 10:
+                            lines = [line.strip() for line in content.split("\n") if line.strip()]
+                            if lines:
+                                summary = "; ".join(lines[:3])
+                                memories.append(f"[{label}] {summary}")
+                except Exception as e:
+                    logger.debug(f"Failed to read via storage_manager: {e}, falling back to direct file read")
+            
+            # Fallback: direct file read
+            if not memories:
+                for category, label in memory_files.items():
+                    file_path = user_memory_dir / f"{category}.md"
+                    if file_path.exists():
+                        try:
+                            content = file_path.read_text(encoding="utf-8").strip()
+                            if content and len(content) > 10:
+                                lines = [line.strip() for line in content.split("\n") if line.strip()]
+                                if lines:
+                                    summary = "; ".join(lines[:3])
+                                    memories.append(f"[{label}] {summary}")
+                        except Exception as e:
+                            logger.debug(f"Failed to read {file_path}: {e}")
             
             if not memories:
                 return MemoryContext(text="")
