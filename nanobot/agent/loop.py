@@ -5,6 +5,7 @@ import json
 import os
 import time
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote_plus
@@ -1613,79 +1614,160 @@ class AgentLoop:
             content="用法：/system list",
         )
 
+    async def _handle_compact_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Handle /compact command to compress and save conversation context."""
+        raw = (msg.content or "").strip()
+        if not raw.startswith("/compact"):
+            return None
+        
+        # Get current session to compress context
+        session = self.sessions.get_or_create(msg.session_key)
+        history = session.get_history()
+        
+        if len(history) <= 2:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="📭 当前对话历史太少，无需压缩。",
+            )
+        
+        compressed_summary = ""
+        try:
+            # Build conversation text for compression
+            conversation_text = []
+            for msg_item in history:
+                role = msg_item.get("role", "unknown")
+                content = msg_item.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    conversation_text.append(f"{role}: {content[:200]}")  # Limit each message
+            
+            if not conversation_text:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="📭 没有找到可压缩的对话内容。",
+                )
+            
+            if not self.memory_adapter or not self.memory_adapter.enable_memory:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="❌ MemU 记忆功能未启用，无法保存压缩内容。",
+                )
+            
+            # Use LLM to generate summary
+            summary_prompt = (
+                "请总结以下对话的关键信息（用户身份、重要事实、待办事项等），"
+                "用3-5个要点简要概括：\n\n" + 
+                "\n".join(conversation_text[-20:])  # Last 20 messages
+            )
+            
+            # Get current model
+            session_model = self._get_session_model(session)
+            provider = self._get_provider_for_model(session_model)
+            
+            response = await provider.chat(
+                messages=[{"role": "user", "content": summary_prompt}],
+                model=session_model,
+                stream=False,
+            )
+            compressed_summary = (response.content or "").strip()
+            
+            if compressed_summary:
+                # Save compressed summary to memory
+                await self.memory_adapter.memorize_turn(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    sender_id=msg.sender_id,
+                    user_message="[对话总结] " + compressed_summary[:500],
+                    assistant_message="已保存对话摘要到长期记忆",
+                    metadata={
+                        "session_key": msg.session_key,
+                        "compressed": True,
+                        "message_count": len(history),
+                    },
+                )
+                
+                content = f"📦 已压缩并保存 {len(history)} 条历史记录到长期记忆：\n\n{compressed_summary[:400]}"
+                if len(compressed_summary) > 400:
+                    content += "..."
+                
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                )
+            else:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="⚠️ 压缩失败，无法生成摘要。",
+                )
+                
+        except Exception as e:
+            logger.warning(f"Context compression failed: {e}")
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"❌ 压缩失败: {str(e)}",
+            )
+
     async def _handle_new_command(self, msg: InboundMessage) -> OutboundMessage | None:
-        """Handle /new command to start a fresh conversation with context compression."""
+        """Handle /new command to archive current conversation and start fresh.
+        
+        This will:
+        1. Archive current conversation to long-term memory (MemU)
+        2. Clear current session history
+        3. Start a new conversation context
+        
+        The archived conversation can still be retrieved via memory search.
+        """
         raw = (msg.content or "").strip()
         if not raw.startswith("/new"):
             return None
         
-        # Get current session to compress context before deletion
+        # Get current session
         session = self.sessions.get_or_create(msg.session_key)
         history = session.get_history()
+        archived_count = len(history) // 2  # Rough count of user-assistant pairs
         
-        compressed_summary = ""
-        if len(history) > 2:  # Only compress if there's meaningful conversation
+        # Archive to MemU if there's content to save
+        if len(history) > 2 and self.memory_adapter and self.memory_adapter.enable_memory:
             try:
-                # Build conversation text for compression
+                # Build conversation text
                 conversation_text = []
                 for msg_item in history:
                     role = msg_item.get("role", "unknown")
                     content = msg_item.get("content", "")
                     if isinstance(content, str) and content.strip():
-                        conversation_text.append(f"{role}: {content[:200]}")  # Limit each message
+                        conversation_text.append(f"{role}: {content[:300]}")
                 
-                if conversation_text and self.memory_adapter and self.memory_adapter.enable_memory:
-                    # Use LLM to generate summary
-                    summary_prompt = (
-                        "请总结以下对话的关键信息（用户身份、重要事实、待办事项等），"
-                        "用3-5个要点简要概括：\n\n" + 
-                        "\n".join(conversation_text[-20:])  # Last 20 messages
-                    )
-                    
-                    # Get current model
-                    session_model = self._get_session_model(session)
-                    provider = self._get_provider_for_model(session_model)
-                    
-                    try:
-                        response = await provider.chat(
-                            messages=[{"role": "user", "content": summary_prompt}],
-                            model=session_model,
-                            stream=False,
-                        )
-                        compressed_summary = (response.content or "").strip()
-                        
-                        # Save compressed summary to memory
-                        if compressed_summary:
-                            await self.memory_adapter.memorize_turn(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                sender_id=msg.sender_id,
-                                user_message="[对话总结] " + compressed_summary[:500],
-                                assistant_message="已保存对话摘要到长期记忆",
-                                metadata={
-                                    "session_key": msg.session_key,
-                                    "compressed": True,
-                                    "message_count": len(history),
-                                },
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to compress context: {e}")
-                        
+                # Archive to memory
+                await self.memory_adapter.memorize_turn(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    sender_id=msg.sender_id,
+                    user_message="[对话归档] " + "\n".join(conversation_text[-30:]),  # Last 30 messages
+                    assistant_message=f"已归档 {archived_count} 轮对话到长期记忆",
+                    metadata={
+                        "session_key": msg.session_key,
+                        "archived": True,
+                        "message_count": len(history),
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
             except Exception as e:
-                logger.warning(f"Context compression failed: {e}")
+                logger.warning(f"Failed to archive conversation: {e}")
         
-        # Delete the current session to start fresh
+        # Clear current session
         deleted = self.sessions.delete(msg.session_key)
         
-        # Build response message
-        content = "🆕 已开启新对话，历史记录已清空。"
-        
-        if compressed_summary:
-            content += f"\n\n📦 已压缩并保存 {len(history)} 条历史记录：\n{compressed_summary[:300]}"
-            if len(compressed_summary) > 300:
-                content += "..."
-        elif not deleted:
-            content += "\n（当前没有历史记录）"
+        content = "🆕 已开启新对话！"
+        if archived_count > 0:
+            content += f"\n📦 已归档 {archived_count} 轮对话到长期记忆"
+            content += "\n💡 之前的内容可通过记忆搜索找回"
+        else:
+            content += "\n（当前没有需要归档的对话）"
         
         return OutboundMessage(
             channel=msg.channel,
@@ -1930,6 +2012,11 @@ class AgentLoop:
         new_response = await self._handle_new_command(msg)
         if new_response:
             return new_response
+        
+        # Handle /compact command before LLM
+        compact_response = await self._handle_compact_command(msg)
+        if compact_response:
+            return compact_response
 
         # Handle /version command before LLM
         menu_response = await self._handle_menu_command(msg)
