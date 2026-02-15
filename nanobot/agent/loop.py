@@ -1520,7 +1520,7 @@ class AgentLoop:
         return unique
 
     def _menu_routed_command_specs(self) -> list[tuple[str, str]]:
-        """路由命令 - 通过 /menu 访问其他命令"""
+        """路由命令 - 通过 /menu 访问其他命令（不包括 MemU）"""
         specs: list[tuple[str, str]] = []
 
         # 路由 /model 命令
@@ -1529,18 +1529,8 @@ class AgentLoop:
             if mapped:
                 specs.append((mapped, f"{desc}（路由）"))
 
-        # 路由 /memu 命令
-        memu_routes = (
-            ("/memu status", "/menu status"),
-            ("/memu tune", "/menu tune"),
-            ("/memu category", "/menu category"),
-        )
-        for command, desc in self._memu_command_specs():
-            for source, target in memu_routes:
-                mapped = self._rewrite_command_prefix(command, source, target)
-                if mapped:
-                    specs.append((mapped, f"{desc}（路由）"))
-                    break
+        # MemU 命令独立，不通过 /menu 路由
+        # 用户应该直接使用 /memu 命令
 
         return self._dedupe_command_specs(specs)
 
@@ -1602,7 +1592,7 @@ class AgentLoop:
         lines.append("【路由命令】")
         lines.extend(self._format_command_lines(self._menu_routed_command_specs()))
         lines.append("")
-        lines.append("💡 提示：/system 查看系统命令，/menu all 查看完整列表")
+        lines.append("💡 提示：/system 查看系统命令，/memu 查看记忆命令")
         return "\n".join(lines)
 
     def _format_system_list(self) -> str:
@@ -1913,46 +1903,8 @@ class AgentLoop:
             session = self.sessions.get_or_create(msg.session_key)
             current_model = self._get_session_model(session)
             return self._handle_model_command(forwarded, session, current_model)
-        if arg_lower.startswith("memu "):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/memu " + arg_raw[5:].strip(),
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            return await self._handle_memu_command(forwarded)
-        if arg_lower.startswith("status"):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/memu " + arg_raw,
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            return await self._handle_memu_command(forwarded)
-        if arg_lower.startswith("category"):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/memu " + arg_raw,
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            return await self._handle_memu_command(forwarded)
-        if arg_lower.startswith("tune"):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/memu " + arg_raw,
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            return await self._handle_memu_command(forwarded)
+        # MemU 命令独立，不通过 /menu 路由
+        # 用户应该直接使用 /memu status, /memu tune 等命令
         if arg_lower in {"version", "ver"}:
             forwarded = InboundMessage(
                 channel=msg.channel,
