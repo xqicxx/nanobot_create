@@ -1614,16 +1614,77 @@ class AgentLoop:
         )
 
     async def _handle_new_command(self, msg: InboundMessage) -> OutboundMessage | None:
-        """Handle /new command to start a fresh conversation."""
+        """Handle /new command to start a fresh conversation with context compression."""
         raw = (msg.content or "").strip()
         if not raw.startswith("/new"):
             return None
         
+        # Get current session to compress context before deletion
+        session = self.sessions.get_or_create(msg.session_key)
+        history = session.get_history()
+        
+        compressed_summary = ""
+        if len(history) > 2:  # Only compress if there's meaningful conversation
+            try:
+                # Build conversation text for compression
+                conversation_text = []
+                for msg_item in history:
+                    role = msg_item.get("role", "unknown")
+                    content = msg_item.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        conversation_text.append(f"{role}: {content[:200]}")  # Limit each message
+                
+                if conversation_text and self.memory_adapter and self.memory_adapter.enable_memory:
+                    # Use LLM to generate summary
+                    summary_prompt = (
+                        "请总结以下对话的关键信息（用户身份、重要事实、待办事项等），"
+                        "用3-5个要点简要概括：\n\n" + 
+                        "\n".join(conversation_text[-20:])  # Last 20 messages
+                    )
+                    
+                    # Get current model
+                    session_model = self._get_session_model(session)
+                    provider = self._get_provider_for_model(session_model)
+                    
+                    try:
+                        response = await provider.chat(
+                            messages=[{"role": "user", "content": summary_prompt}],
+                            model=session_model,
+                            stream=False,
+                        )
+                        compressed_summary = (response.content or "").strip()
+                        
+                        # Save compressed summary to memory
+                        if compressed_summary:
+                            await self.memory_adapter.memorize_turn(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                sender_id=msg.sender_id,
+                                user_message="[对话总结] " + compressed_summary[:500],
+                                assistant_message="已保存对话摘要到长期记忆",
+                                metadata={
+                                    "session_key": msg.session_key,
+                                    "compressed": True,
+                                    "message_count": len(history),
+                                },
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to compress context: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"Context compression failed: {e}")
+        
         # Delete the current session to start fresh
         deleted = self.sessions.delete(msg.session_key)
         
+        # Build response message
         content = "🆕 已开启新对话，历史记录已清空。"
-        if not deleted:
+        
+        if compressed_summary:
+            content += f"\n\n📦 已压缩并保存 {len(history)} 条历史记录：\n{compressed_summary[:300]}"
+            if len(compressed_summary) > 300:
+                content += "..."
+        elif not deleted:
             content += "\n（当前没有历史记录）"
         
         return OutboundMessage(
