@@ -200,7 +200,16 @@ class MemoryAdapter:
             memory_dir = self.workspace / ".memu" / "memory"
             user_memory_dir = memory_dir / "nanobot" / user_id
             
+            logger.debug(f"Looking for memories in: {user_memory_dir}")
+            
             if not user_memory_dir.exists():
+                logger.debug(f"Memory directory not found: {user_memory_dir}")
+                # Try to find any memory directories
+                if memory_dir.exists():
+                    import os
+                    for root, dirs, files in os.walk(memory_dir):
+                        if files:
+                            logger.debug(f"Found files in: {root} - {files}")
                 return MemoryContext(text="")
             
             # Read all memory files
