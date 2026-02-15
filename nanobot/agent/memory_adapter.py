@@ -309,10 +309,30 @@ class MemoryAdapter:
 
         user_id = self.build_user_id(channel, chat_id, sender_id)
 
+        # Clean text to avoid encoding issues with DeepSeek API
+        # Replace full-width punctuation with half-width equivalents
+        def clean_text(text: str) -> str:
+            replacements = {
+                '\uff1a': ':',  # Full-width colon
+                '\uff0c': ',',  # Full-width comma
+                '\u3002': '.',  # Full-width period
+                '\uff01': '!',  # Full-width exclamation
+                '\uff1f': '?',  # Full-width question mark
+                '\uff08': '(',  # Full-width left parenthesis
+                '\uff09': ')',  # Full-width right parenthesis
+                '\u201c': '"',  # Left double quote
+                '\u201d': '"',  # Right double quote
+                '\u2018': "'",  # Left single quote
+                '\u2019': "'",  # Right single quote
+            }
+            for full, half in replacements.items():
+                text = text.replace(full, half)
+            return text
+
         # Format conversation for memu-py 0.2.x
         conversation = [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_message},
+            {"role": "user", "content": clean_text(user_message)},
+            {"role": "assistant", "content": clean_text(assistant_message)},
         ]
 
         try:
