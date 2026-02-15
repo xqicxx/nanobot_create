@@ -38,7 +38,8 @@ class MemoryRetrieveTool(Tool):
             "required": ["query"],
         }
     
-    async def execute(self, query: str, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> str:
+        query = kwargs.get("query", "")
         """Execute memory retrieval."""
         if not self.memory_adapter or not self.memory_adapter.enable_memory:
             return "Memory system is not enabled."
@@ -131,7 +132,9 @@ class MemorySaveTool(Tool):
             "required": ["content", "category"],
         }
     
-    async def execute(self, content: str, category: str, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> str:
+        content = kwargs.get("content", "")
+        category = kwargs.get("category", "activity")
         """Execute memory saving."""
         if not self.memory_adapter or not self.memory_adapter.enable_memory:
             return "Memory system is not enabled."
