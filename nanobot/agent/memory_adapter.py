@@ -94,7 +94,7 @@ class MemoryAdapter:
 
         try:
             self._memory_agent = MemoryAgent(
-                llm_client,
+                llm_client=llm_client,
                 memory_dir=memory_dir,
                 enable_embeddings=True,
                 agent_id="nanobot",
