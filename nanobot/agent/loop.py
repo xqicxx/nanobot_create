@@ -1514,13 +1514,16 @@ class AgentLoop:
         return unique
 
     def _menu_routed_command_specs(self) -> list[tuple[str, str]]:
+        """路由命令 - 通过 /menu 访问其他命令"""
         specs: list[tuple[str, str]] = []
 
+        # 路由 /model 命令
         for command, desc in self._model_command_specs():
             mapped = self._rewrite_command_prefix(command, "/model", "/menu model")
             if mapped:
                 specs.append((mapped, f"{desc}（路由）"))
 
+        # 路由 /memu 命令
         memu_routes = (
             ("/memu status", "/menu status"),
             ("/memu tune", "/menu tune"),
@@ -1533,18 +1536,12 @@ class AgentLoop:
                     specs.append((mapped, f"{desc}（路由）"))
                     break
 
-            if mapped:
-                specs.append((mapped, f"{desc}（路由）"))
-
         return self._dedupe_command_specs(specs)
 
     def _menu_command_specs(self) -> list[tuple[str, str]]:
         return self._dedupe_command_specs(
             [*self._menu_base_command_specs(), *self._menu_routed_command_specs()]
         )
-
-        return [
-        ]
 
     def _model_command_specs(self) -> list[tuple[str, str]]:
         return [
