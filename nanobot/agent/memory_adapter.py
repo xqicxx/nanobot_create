@@ -138,7 +138,7 @@ class MemoryAdapter:
             if provider == "deepseek" or "deepseek" in base_url.lower():
                 client = DeepSeekClient(
                     api_key=api_key,
-                    endpoint=base_url,
+                    base_url=base_url,
                     model_name=chat_model,
                 )
                 logger.info(f"✅ DeepSeek LLM client created (model: {chat_model})")
