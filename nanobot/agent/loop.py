@@ -1475,17 +1475,21 @@ class AgentLoop:
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     def _system_command_specs(self) -> list[tuple[str, str]]:
+        """核心系统命令 - 所有用户都需要的基础命令"""
         return [
-            ("/system list", "系统命令总览"),
+            ("/new", "归档当前对话并开启新对话"),
+            ("/compact", "压缩当前对话并保存到记忆"),
+            ("/system help", "显示本帮助信息"),
         ]
 
     def _menu_base_command_specs(self) -> list[tuple[str, str]]:
+        """扩展菜单命令 - 高级功能"""
         return [
-            ("/menu list", "菜单命令总览"),
-            ("/menu all", "全量命令（含分类）"),
-            ("/menu categories", "显示所有分类与描述"),
-            ("/menu restart now", "重启 agent 进程"),
-            ("/menu version", "版本信息（路由到 /version）"),
+            ("/menu all", "显示所有可用命令"),
+            ("/menu categories", "显示记忆分类"),
+            ("/menu restart now", "重启 nanobot 进程"),
+            ("/menu version", "显示版本信息"),
+            ("/menu help", "显示菜单帮助"),
         ]
 
     @staticmethod
@@ -1583,35 +1587,69 @@ class AgentLoop:
 
 
     def _format_menu_list(self) -> str:
-        lines = ["菜单命令："]
-        lines.extend(self._format_command_lines(self._menu_command_specs()))
+        """格式化菜单命令列表"""
+        lines = [
+            "📋 菜单命令",
+            "",
+            "【基础命令】",
+        ]
+        lines.extend(self._format_command_lines(self._menu_base_command_specs()))
+        lines.append("")
+        lines.append("【路由命令】")
+        lines.extend(self._format_command_lines(self._menu_routed_command_specs()))
+        lines.append("")
+        lines.append("💡 提示：/system 查看系统命令")
         return "\n".join(lines)
 
     def _format_system_list(self) -> str:
-        lines: list[str] = []
+        """格式化完整的系统命令列表（用于 /menu all）"""
+        lines = ["🤖 nanobot 完整命令列表", ""]
         for idx, (title, specs) in enumerate(self._command_sections()):
             if idx:
                 lines.append("")
-            lines.append(f"{title}：")
+            lines.append(f"【{title}】")
             lines.extend(self._format_command_lines(specs))
         return "\n".join(lines)
 
     async def _handle_system_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        """处理 /system 命令 - 默认显示帮助信息"""
         raw = (msg.content or "").strip()
         if not raw.startswith("/system"):
             return None
+        
         parts = raw.split(None, 1)
-        arg = parts[1].strip().lower() if len(parts) > 1 else "list"
-        if arg in {"help", "?", "ls", "list"}:
+        arg = parts[1].strip().lower() if len(parts) > 1 else "help"
+        
+        if arg in {"help", "?", "ls", "list", ""}:
+            # 显示完整的系统帮助，包含所有命令分类
+            lines = [
+                "🤖 nanobot 命令帮助",
+                "",
+                "【系统命令】",
+            ]
+            lines.extend(self._format_command_lines(self._system_command_specs()))
+            lines.append("")
+            lines.append("【菜单命令】")
+            lines.extend(self._format_command_lines(self._menu_base_command_specs()))
+            lines.append("")
+            lines.append("【模型命令】")
+            lines.extend(self._format_command_lines(self._model_command_specs()))
+            lines.append("")
+            lines.append("【MemU 命令】")
+            lines.extend(self._format_command_lines(self._memu_command_specs()))
+            lines.append("")
+            lines.append("💡 提示：/menu all 查看所有命令详情")
+            
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=self._format_system_list(),
+                content="\n".join(lines),
             )
+        
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="用法：/system list",
+            content="用法：/system help 或 /system",
         )
 
     async def _handle_compact_command(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -1776,12 +1814,23 @@ class AgentLoop:
         )
 
     async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
+        """处理 /menu 命令 - 默认显示帮助"""
         raw = (msg.content or "").strip()
         if not raw.startswith("/menu"):
             return None
+        
         parts = raw.split(None, 1)
-        arg_raw = parts[1].strip() if len(parts) > 1 else "list"
+        arg_raw = parts[1].strip() if len(parts) > 1 else "help"
         arg_lower = arg_raw.lower()
+        
+        # 帮助信息（默认）
+        if arg_lower in {"help", "?", "", "list", "ls"}:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_menu_list(),
+            )
+        
         if arg_lower.startswith("restart"):
             restart_parts = arg_raw.split(None, 1)
             restart_flag = restart_parts[1].strip().lower() if len(restart_parts) > 1 else ""
@@ -1883,34 +1932,11 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
             return self._handle_version_command(forwarded)
-        if arg_lower in {"list", "ls"}:
-            # /menu list - 显示记忆内容
-            items = await self.memory_adapter.query_items(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                sender_id=msg.sender_id,
-                limit=20,
-            )
-            if not items:
-                content = "暂无记忆内容。用 /menu help 查看命令。"
-            else:
-                lines = ["记忆内容："]
-                for idx, item in enumerate(items, start=1):
-                    content_text = item.get("content", "")[:200]
-                    memory_type = item.get("memory_type", "unknown")
-                    lines.append(f"{idx}. [{memory_type}] {content_text}")
-                content = "\n".join(lines)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        if arg_lower in {"help", "?"}:
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self._format_menu_list(),
-            )
+        # 其他命令返回帮助
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="用法：/menu list | /menu all | /system list",
+            content=f"未知命令：{arg_raw}\n用法：/menu help",
         )
 
     def _is_systemd_managed(self) -> bool:
