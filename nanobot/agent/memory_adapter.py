@@ -156,7 +156,7 @@ class MemoryAdapter:
             return None
 
     def _setup_embedding_env(self) -> None:
-        """Setup embedding environment variables from config."""
+        """Setup embedding environment variables from config for memu-py 0.2.x."""
         memu_cfg = self.memu_config
         embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
         
@@ -165,13 +165,23 @@ class MemoryAdapter:
             base_url = getattr(embedding_cfg, "base_url", "")
             embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
             
-            # Set environment variables for memu-py to read
+            # Set environment variables for memu-py 0.2.x
+            # Note: memu-py 0.2.x uses different env vars than 0.1.x
             if api_key:
                 os.environ["OPENAI_API_KEY"] = api_key
+                # Also set for memu-py compatibility
+                os.environ["MEMU_LLM_API_KEY"] = api_key
             if base_url:
                 os.environ["OPENAI_BASE_URL"] = base_url
+                os.environ["MEMU_LLM_BASE_URL"] = base_url
             if embed_model:
+                # memu-py 0.2.x uses MEMU_EMBEDDING_MODEL
+                os.environ["MEMU_EMBEDDING_MODEL"] = embed_model
+                # For backward compatibility
                 os.environ["OPENAI_EMBED_MODEL"] = embed_model
+            
+            # Set provider to openai for SiliconFlow compatibility
+            os.environ["MEMU_EMBEDDING_PROVIDER"] = "openai"
 
     @staticmethod
     def build_user_id(channel: str | None, chat_id: str | None, sender_id: str | None) -> str:
