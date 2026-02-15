@@ -1495,10 +1495,16 @@ class AgentLoop:
 
     @staticmethod
     def _rewrite_command_prefix(command: str, source: str, target: str) -> str | None:
+        """Rewrite command prefix, handling commands with parameters."""
         if command == source:
             return target
         if command.startswith(source + " "):
             return target + command[len(source) :]
+        # Handle commands with parameters like "/memu status [fast|full]"
+        if command.startswith(source):
+            remainder = command[len(source):]
+            if remainder and not remainder[0].isalnum():
+                return target + remainder
         return None
 
     @staticmethod
