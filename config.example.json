@@ -1,5 +1,10 @@
 # Nanobot Configuration Example
 # Copy this file to ~/.nanobot/config.json and customize the values
+# 
+# 配置说明：
+# 1. 复制此文件到 ~/.nanobot/config.json
+# 2. 替换所有的 API Key 为你自己的
+# 3. 根据需要调整其他配置
 
 {
   "agents": {
@@ -29,8 +34,11 @@
       "allowFrom": []
     }
   },
+  
   "memu": {
     "enabled": true,
+    
+    // LLM 配置：用于生成记忆摘要和对话处理
     "default": {
       "provider": "openai",
       "baseUrl": "https://api.deepseek.com/v1",
@@ -38,14 +46,37 @@
       "chatModel": "deepseek-chat",
       "clientBackend": "sdk"
     },
+    
+    // Embedding 配置：用于向量检索（语义搜索）
+    // 支持多种 embedding 提供商，选择适合你的：
     "embedding": {
+      // ========== 方案 1: SiliconFlow（推荐，国内可用）==========
       "provider": "openai",
       "baseUrl": "https://api.siliconflow.cn/v1",
       "apiKey": "sk-your-siliconflow-api-key",
       "embedModel": "BAAI/bge-m3",
-      "clientBackend": "sdk"
+      "clientBackend": "sdk",
+      
+      // ========== 方案 2: OpenAI（需要海外访问）==========
+      // "provider": "openai",
+      // "baseUrl": "https://api.openai.com/v1",
+      // "apiKey": "sk-your-openai-api-key",
+      // "embedModel": "text-embedding-3-small",
+      // "clientBackend": "sdk",
+      
+      // ========== 方案 3: Azure OpenAI（企业环境）==========
+      // "provider": "openai",
+      // "baseUrl": "https://your-resource.openai.azure.com/openai/deployments/your-deployment",
+      // "apiKey": "your-azure-api-key",
+      // "embedModel": "text-embedding-3-small",
+      // "clientBackend": "sdk",
+      
+      // ========== 方案 4: 禁用 Embedding（最简单）==========
+      // 如果不配置 embedding 部分，系统将自动禁用语义搜索
+      // 记忆功能仍然可用，只是没有向量检索能力
     }
   },
+  
   "tools": {
     "web": {
       "search": {
@@ -63,5 +94,6 @@
       }
     }
   },
+  
   "workspace": "/root/.nanobot/workspace"
 }
