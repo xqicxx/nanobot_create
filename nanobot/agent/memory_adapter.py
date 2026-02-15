@@ -221,6 +221,9 @@ class MemoryAdapter:
             self.enable_memory = False
             return
 
+        # Setup embedding environment variables BEFORE creating MemoryAgent
+        self._setup_embedding_env()
+
         # Build LLM client from config
         llm_client = self._create_llm_client()
         if llm_client is None:
@@ -231,22 +234,13 @@ class MemoryAdapter:
         memory_dir = str(self.workspace / ".memu" / "memory")
 
         try:
-            # Create embedding client from config if available
-            embedding_client = self._create_embedding_client()
-            
-            if embedding_client:
-                self._memory_agent = MemoryAgent(
-                    llm_client,
-                    memory_dir=memory_dir,
-                    enable_embeddings=True,
-                    embedding_client=embedding_client,
-                )
-            else:
-                self._memory_agent = MemoryAgent(
-                    llm_client,
-                    memory_dir=memory_dir,
-                    enable_embeddings=True,
-                )
+            # Note: memu-py 0.1.7 doesn't support custom embedding models well
+            # Disable embeddings for now to avoid API errors
+            self._memory_agent = MemoryAgent(
+                llm_client,
+                memory_dir=memory_dir,
+                enable_embeddings=False,
+            )
             self._recall_agent = RecallAgent(
                 memory_dir=memory_dir,
             )
@@ -255,37 +249,23 @@ class MemoryAdapter:
             logger.error(f"Failed to initialize MemU agents: {exc}")
             self.enable_memory = False
     
-    def _create_embedding_client(self) -> Any | None:
-        """Create embedding client from configuration."""
-        try:
-            from memu.memory.embeddings import create_embedding_client
-        except Exception:
-            return None
-        
+    def _setup_embedding_env(self) -> None:
+        """Setup embedding environment variables from config."""
         memu_cfg = self.memu_config
         embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
         
-        if embedding_cfg is None:
-            return None
-        
-        api_key = getattr(embedding_cfg, "api_key", "")
-        base_url = getattr(embedding_cfg, "base_url", "")
-        embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
-        
-        if not api_key:
-            return None
-        
-        try:
-            # Create custom embedding client for OpenAI-compatible API (SiliconFlow)
-            return create_embedding_client(
-                "openai",
-                api_key=api_key,
-                base_url=base_url,
-                model=embed_model,
-            )
-        except Exception as exc:
-            logger.warning(f"Failed to create custom embedding client: {exc}")
-            return None
+        if embedding_cfg:
+            api_key = getattr(embedding_cfg, "api_key", "")
+            base_url = getattr(embedding_cfg, "base_url", "")
+            embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
+            
+            # Set environment variables for memu-py to read
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+            if base_url:
+                os.environ["OPENAI_BASE_URL"] = base_url
+            if embed_model:
+                os.environ["OPENAI_EMBED_MODEL"] = embed_model
 
     def _create_llm_client(self) -> Any | None:
         """Create LLM client from configuration."""
