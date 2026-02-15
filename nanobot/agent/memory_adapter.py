@@ -271,14 +271,14 @@ class MemoryAdapter:
             if provider == "deepseek" or "deepseek" in base_url.lower():
                 return DeepSeekClient(
                     api_key=api_key,
-                    base_url=base_url,
+                    endpoint=base_url,
                     model_name=chat_model,
                 )
             else:
                 return OpenAIClient(
                     api_key=api_key,
                     base_url=base_url,
-                    model_name=chat_model,
+                    model=chat_model,
                 )
         except Exception as exc:
             logger.error(f"Failed to create LLM client: {exc}")
