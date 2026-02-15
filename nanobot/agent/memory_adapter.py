@@ -75,8 +75,10 @@ class MemoryAdapter:
             from memu.memory import MemoryAgent
             from memu.llm import OpenAIClient, DeepSeekClient
         except Exception as exc:
-            logger.error(f"Failed to import MemU modules: {exc}")
-            self.enable_memory = False
+            logger.warning(f"MemU modules not available: {exc}")
+            logger.info("Using file-based memory storage instead")
+            # 不设置 enable_memory = False，继续使用文件模式
+            self._memory_agent = None
             return
 
         # Setup embedding configuration
@@ -85,8 +87,8 @@ class MemoryAdapter:
         # Build LLM client from config
         llm_client = self._create_llm_client()
         if llm_client is None:
-            logger.error("Failed to create LLM client for MemU")
-            self.enable_memory = False
+            logger.warning("Failed to create LLM client for MemU, using file-based storage")
+            self._memory_agent = None
             return
 
         memory_dir = str(self.workspace / ".memu" / "memory")
@@ -101,8 +103,9 @@ class MemoryAdapter:
             )
             logger.info("MemU MemoryAgent initialized successfully")
         except Exception as exc:
-            logger.error(f"Failed to initialize MemoryAgent: {exc}")
-            self.enable_memory = False
+            logger.warning(f"Failed to initialize MemoryAgent: {exc}")
+            logger.info("Using file-based memory storage instead")
+            self._memory_agent = None
 
     def _create_llm_client(self) -> Any | None:
         """Create LLM client from configuration."""
@@ -334,6 +337,25 @@ class MemoryAdapter:
             {"role": "assistant", "content": clean_text(assistant_message)},
         ]
 
+        # 如果没有 MemoryAgent，直接写入文件
+        if self._memory_agent is None:
+            try:
+                self._save_to_file(
+                    channel=channel,
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    user_message=user_message,
+                    assistant_message=assistant_message,
+                )
+                logger.info(
+                    "MemU saved to file (channel={}, sender={})",
+                    channel,
+                    sender_id,
+                )
+            except Exception as exc:
+                logger.warning(f"MemU file save failed: {exc}")
+            return
+
         try:
             start = time.perf_counter()
             result = self._memory_agent.run(
@@ -368,6 +390,25 @@ class MemoryAdapter:
                 logger.warning(f"MemU memorize failed: {result.get('error')}")
         except Exception as exc:
             logger.warning(f"MemU memorize failed: {exc}")
+
+    def _save_to_file(self, *, channel, chat_id, sender_id, user_message, assistant_message):
+        """Save conversation to file directly (fallback when MemoryAgent not available)."""
+        from datetime import datetime
+        
+        user_id = self.build_user_id(channel, chat_id, sender_id)
+        memory_dir = self.workspace / ".memu" / "memory" / "nanobot" / user_id
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        
+        file_path = memory_dir / "activity.md"
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"\n## {timestamp}\n**User:** {user_message[:200]}\n**Assistant:** {assistant_message[:200]}\n"
+        
+        if file_path.exists():
+            existing = file_path.read_text(encoding="utf-8")
+            file_path.write_text(existing + entry, encoding="utf-8")
+        else:
+            file_path.write_text(f"# Activity Memory\n{entry}", encoding="utf-8")
 
     def list_category_config(self) -> list[dict[str, Any]]:
         """List available memory categories."""
