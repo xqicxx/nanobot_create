@@ -427,9 +427,9 @@ class MemoryAdapter:
 
         try:
             # Use RecallAgent for retrieval
+            # memu-py 0.1.7 uses character_name instead of agent_id/user_id
             result = self._recall_agent.retrieve_relevant_memories(
-                agent_id="nanobot",
-                user_id=user_id,
+                character_name=user_id,
                 query=current_message,
                 top_k=top_k,
             )
@@ -440,14 +440,20 @@ class MemoryAdapter:
 
     def _format_recall_result(self, result: dict[str, Any]) -> str:
         """Format RecallAgent result into context text."""
-        memories = result.get("memories", []) if isinstance(result, dict) else []
+        # memu-py 0.1.7 uses 'results' key
+        memories = result.get("results", []) if isinstance(result, dict) else []
         if not memories:
             return ""
 
         lines: list[str] = ["# Memory (MemU)"]
         for mem in memories[:self.retrieve_top_k]:
-            content = mem.get("content", "") if isinstance(mem, dict) else str(mem)
-            category = mem.get("category", "unknown") if isinstance(mem, dict) else "memory"
+            # memu-py 0.1.7 result format has 'content' and 'memory_type'
+            if isinstance(mem, dict):
+                content = mem.get("content", "")
+                category = mem.get("memory_type", "unknown")
+            else:
+                content = str(mem)
+                category = "memory"
             if content:
                 lines.append(f"- [{category}] {content}")
 
@@ -474,6 +480,7 @@ class MemoryAdapter:
         try:
             start = time.perf_counter()
             # Use MemoryAgent.call_function to add activity memory
+            # memu-py 0.1.7 uses character_name instead of user_id
             result = self._memory_agent.call_function(
                 "add_activity_memory",
                 {
