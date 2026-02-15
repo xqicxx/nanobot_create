@@ -221,8 +221,9 @@ class MemoryAdapter:
             self.enable_memory = False
             return
 
-        # Setup embedding environment variables BEFORE creating MemoryAgent
-        self._setup_embedding_env()
+        # Setup embedding configuration BEFORE creating MemoryAgent
+        # This monkey-patches memu-py to support custom embedding providers
+        self._patch_memu_embedding()
 
         # Build LLM client from config
         llm_client = self._create_llm_client()
@@ -253,23 +254,64 @@ class MemoryAdapter:
             logger.error(f"Failed to initialize MemU agents: {exc}")
             self.enable_memory = False
     
-    def _setup_embedding_env(self) -> None:
-        """Setup embedding environment variables from config."""
+    def _patch_memu_embedding(self) -> None:
+        """Monkey-patch memu-py to support custom embedding configuration.
+        
+        This allows using SiliconFlow or other OpenAI-compatible APIs for embeddings.
+        """
+        try:
+            from memu.memory import embeddings as memu_embeddings
+            import openai
+        except Exception:
+            return
+        
+        # Get embedding config
         memu_cfg = self.memu_config
         embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
         
-        if embedding_cfg:
-            api_key = getattr(embedding_cfg, "api_key", "")
-            base_url = getattr(embedding_cfg, "base_url", "")
-            embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
-            
-            # Set environment variables for memu-py to read
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-            if base_url:
-                os.environ["OPENAI_BASE_URL"] = base_url
-            if embed_model:
-                os.environ["OPENAI_EMBED_MODEL"] = embed_model
+        if not embedding_cfg:
+            return
+        
+        api_key = getattr(embedding_cfg, "api_key", "")
+        base_url = getattr(embedding_cfg, "base_url", "")
+        embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
+        
+        if not api_key:
+            return
+        
+        # Store original _init_openai method
+        original_init_openai = memu_embeddings.EmbeddingClient._init_openai
+        
+        def patched_init_openai(self, **kwargs):
+            """Patched version that uses custom base_url and model."""
+            try:
+                # Get API key from kwargs or environment
+                api_key = kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    raise ValueError("OpenAI API key not provided")
+                
+                # Create client with custom base_url if provided
+                if base_url:
+                    self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+                else:
+                    self.client = openai.OpenAI(api_key=api_key)
+                
+                # Use custom model if provided
+                if embed_model:
+                    self.model = embed_model
+                
+                logger.info(f"OpenAI embedding client initialized with model: {self.model} (patched)")
+                
+            except ImportError:
+                logger.error("OpenAI library not installed. Install with: pip install openai")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI client: {e}")
+                raise
+        
+        # Apply the patch
+        memu_embeddings.EmbeddingClient._init_openai = patched_init_openai
+        logger.info(f"Patched memu-py embedding to use: {base_url or 'OpenAI default'} with model {embed_model}")
 
     def _create_llm_client(self) -> Any | None:
         """Create LLM client from configuration."""
