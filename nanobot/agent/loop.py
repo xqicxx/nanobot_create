@@ -445,6 +445,13 @@ class AgentLoop:
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
+        
+        # Memory tools (MemU integration)
+        if self.memory_adapter and self.memory_adapter.enable_memory:
+            from nanobot.agent.tools.memory_tool import MemoryRetrieveTool, MemorySaveTool
+            self.tools.register(MemoryRetrieveTool(self.memory_adapter))
+            self.tools.register(MemorySaveTool(self.memory_adapter))
+            logger.info("Memory tools registered (retrieve_memory, save_memory)")
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
