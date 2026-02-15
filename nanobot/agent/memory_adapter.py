@@ -232,11 +232,11 @@ class MemoryAdapter:
 
         try:
             self._memory_agent = MemoryAgent(
-                llm_client=llm_client,
-                agent_id="nanobot",
-                user_id="default",
+                llm_client,
                 memory_dir=memory_dir,
                 enable_embeddings=True,
+                agent_id="nanobot",
+                user_id="default",
             )
             self._recall_agent = RecallAgent(
                 memory_dir=memory_dir,
