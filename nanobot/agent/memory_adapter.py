@@ -222,6 +222,9 @@ class MemoryAdapter:
             return
 
         # Build LLM client from config
+        # Set embedding environment variables before creating MemoryAgent
+        self._setup_embedding_env()
+
         llm_client = self._create_llm_client()
         if llm_client is None:
             logger.error("Failed to create LLM client for MemU")
@@ -279,6 +282,24 @@ class MemoryAdapter:
         except Exception as exc:
             logger.error(f"Failed to create LLM client: {exc}")
             return None
+
+    def _setup_embedding_env(self) -> None:
+        """Setup embedding environment variables from config."""
+        memu_cfg = self.memu_config
+        embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
+        
+        if embedding_cfg:
+            # Set environment variables for memu-py to read
+            api_key = getattr(embedding_cfg, "api_key", "")
+            base_url = getattr(embedding_cfg, "base_url", "")
+            embed_model = getattr(embedding_cfg, "embed_model", "")
+            
+            if api_key:
+                os.environ["SILICONFLOW_API_KEY"] = api_key
+            if base_url:
+                os.environ["SILICONFLOW_BASE_URL"] = base_url
+            if embed_model:
+                os.environ["SILICONFLOW_EMBED_MODEL"] = embed_model
 
     def get_retrieve_tuning(self) -> dict[str, int]:
         return {
