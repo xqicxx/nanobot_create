@@ -1857,8 +1857,6 @@ class AgentLoop:
             self.sessions.save(session)
             return version_response
 
-        return None
-        
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
 
