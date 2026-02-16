@@ -1489,17 +1489,17 @@ class AgentLoop:
             ("/system help", "显示本帮助信息"),
         ]
 
-    def _menu_base_command_specs(self) -> list[tuple[str, str]]:
-        """菜单命令（MemU 记忆系统）"""
+    def _memu_base_command_specs(self) -> list[tuple[str, str]]:
+        """MemU 记忆系统命令"""
         return [
-            ("/menu help", "显示此帮助信息"),
-            ("/menu list", "显示记忆内容"),
-            ("/menu all", "显示所有可用命令"),
-            ("/menu categories", "显示记忆分类"),
-            ("/menu status", "查看 MemU 状态"),
-            ("/menu tune", "MemU 调优"),
-            ("/menu restart now", "重启 nanobot 进程"),
-            ("/menu version", "显示版本信息"),
+            ("/memu help", "显示此帮助信息"),
+            ("/memu list", "显示记忆内容"),
+            ("/memu all", "显示所有可用命令"),
+            ("/memu categories", "显示记忆分类"),
+            ("/memu status", "查看 MemU 状态"),
+            ("/memu tune", "MemU 调优"),
+            ("/memu restart now", "重启 nanobot 进程"),
+            ("/memu version", "显示版本信息"),
         ]
 
     @staticmethod
@@ -1528,25 +1528,10 @@ class AgentLoop:
             unique.append((command, desc))
         return unique
 
-    def _menu_routed_command_specs(self) -> list[tuple[str, str]]:
-        """路由命令 - 通过 /menu 访问其他命令（不包括 MemU）"""
-        specs: list[tuple[str, str]] = []
-
-        # 路由 /model 命令
-        for command, desc in self._model_command_specs():
-            mapped = self._rewrite_command_prefix(command, "/model", "/menu model")
-            if mapped:
-                specs.append((mapped, f"{desc}（路由）"))
-
-        # MemU 命令独立，不通过 /menu 路由
-        # 用户应该直接使用 /memu 命令
-
-        return self._dedupe_command_specs(specs)
-
-    def _menu_command_specs(self) -> list[tuple[str, str]]:
-        """菜单命令（包含 MemU 功能）"""
+    def _memu_command_specs_full(self) -> list[tuple[str, str]]:
+        """完整的 MemU 命令列表"""
         return self._dedupe_command_specs(
-            [*self._menu_base_command_specs(), *self._menu_routed_command_specs(), *self._memu_command_specs()]
+            [*self._memu_base_command_specs(), *self._memu_command_specs()]
         )
 
     def _model_command_specs(self) -> list[tuple[str, str]]:
@@ -1576,7 +1561,7 @@ class AgentLoop:
         # MemU 命令已集成到菜单命令中
         return [
             ("系统命令", self._system_command_specs()),
-            ("菜单命令 (MemU)", self._menu_command_specs()),
+            ("MemU 命令", self._memu_command_specs_full()),
             ("模型命令", self._model_command_specs()),
             ("其他命令", self._misc_command_specs()),
         ]
@@ -1590,23 +1575,23 @@ class AgentLoop:
         return lines
 
 
-    def _format_menu_list(self) -> str:
-        """格式化菜单命令列表"""
+    def _format_memu_list(self) -> str:
+        """格式化 MemU 命令列表"""
         lines = [
-            "📋 菜单命令",
+            "📋 MemU 记忆命令",
             "",
             "【基础命令】",
         ]
-        lines.extend(self._format_command_lines(self._menu_base_command_specs()))
+        lines.extend(self._format_command_lines(self._memu_base_command_specs()))
         lines.append("")
-        lines.append("【路由命令】")
-        lines.extend(self._format_command_lines(self._menu_routed_command_specs()))
+        lines.append("【MemU 核心命令】")
+        lines.extend(self._format_command_lines(self._memu_command_specs()))
         lines.append("")
-        lines.append("💡 提示：/system 查看系统命令，/memu 查看记忆命令")
+        lines.append("💡 提示：/system 查看系统命令，/model 查看模型命令")
         return "\n".join(lines)
 
     def _format_system_list(self) -> str:
-        """格式化完整的系统命令列表（用于 /menu all）"""
+        """格式化完整的系统命令列表（用于 /memu all）"""
         lines = ["🤖 nanobot 完整命令列表", ""]
         for idx, (title, specs) in enumerate(self._command_sections()):
             if idx:
@@ -1633,16 +1618,13 @@ class AgentLoop:
             ]
             lines.extend(self._format_command_lines(self._system_command_specs()))
             lines.append("")
-            lines.append("【菜单命令】")
-            lines.extend(self._format_command_lines(self._menu_base_command_specs()))
+            lines.append("【MemU 命令】")
+            lines.extend(self._format_command_lines(self._memu_command_specs_full()))
             lines.append("")
             lines.append("【模型命令】")
             lines.extend(self._format_command_lines(self._model_command_specs()))
             lines.append("")
-            lines.append("【MemU 命令】")
-            lines.extend(self._format_command_lines(self._memu_command_specs()))
-            lines.append("")
-            lines.append("💡 提示：/menu all 查看所有命令详情")
+            lines.append("💡 提示：/memu all 查看所有命令详情")
             
             return OutboundMessage(
                 channel=msg.channel,
@@ -1825,24 +1807,29 @@ class AgentLoop:
             content=content,
         )
 
-    async def _handle_menu_command(self, msg: InboundMessage) -> OutboundMessage | None:
-        """处理 /menu 命令"""
+    async def _handle_memu_command_full(self, msg: InboundMessage) -> OutboundMessage | None:
+        """处理 /memu 命令（包括原 /menu 功能，已废弃 /menu）"""
         raw = (msg.content or "").strip()
-        if not raw.startswith("/menu"):
+
+        # 向后兼容：/menu 自动重定向到 /memu
+        if raw.startswith("/menu"):
+            raw = "/memu" + raw[5:]  # 将 /menu 转换为 /memu
+
+        if not raw.startswith("/memu"):
             return None
-        
+
         parts = raw.split(None, 1)
         arg_raw = parts[1].strip() if len(parts) > 1 else "help"
         arg_lower = arg_raw.lower()
-        
+
         # 帮助信息（默认）
         if arg_lower in {"help", "?", ""}:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=self._format_menu_list(),
+                content=self._format_memu_list(),
             )
-        
+
         # 显示记忆内容
         if arg_lower in {"list", "ls"}:
             items = await self.memory_adapter.query_items(
@@ -1861,14 +1848,14 @@ class AgentLoop:
                     lines.append(f"{idx}. [{memory_type}] {content_text}")
                 content = "\n".join(lines)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        
+
         if arg_lower.startswith("restart"):
             restart_parts = arg_raw.split(None, 1)
             restart_flag = restart_parts[1].strip().lower() if len(restart_parts) > 1 else ""
             if restart_flag not in {"now", "confirm", "yes", "ok", "确认"}:
                 content = (
                     "将重启当前 nanobot 进程（适用于 systemd 托管）。\n"
-                    "用法：/menu restart now"
+                    "用法：/memu restart now"
                 )
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
             if not self._is_systemd_managed():
@@ -1901,20 +1888,8 @@ class AgentLoop:
                     desc = cat.get("description", "")
                     lines.append(f"{idx}. {name} - {desc}" if desc else f"{idx}. {name}")
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
-        if arg_lower.startswith("model "):
-            forwarded = InboundMessage(
-                channel=msg.channel,
-                sender_id=msg.sender_id,
-                chat_id=msg.chat_id,
-                content="/model " + arg_raw[6:].strip(),
-                media=msg.media,
-                metadata=msg.metadata,
-            )
-            session = self.sessions.get_or_create(msg.session_key)
-            current_model = self._get_session_model(session)
-            return self._handle_model_command(forwarded, session, current_model)
-        # MemU 命令集成到 /menu
-        if arg_lower.startswith("status") or arg_lower.startswith("tune"):
+        # MemU 命令（status, tune, category）
+        if arg_lower.startswith("status") or arg_lower.startswith("tune") or arg_lower.startswith("category"):
             forwarded = InboundMessage(
                 channel=msg.channel,
                 sender_id=msg.sender_id,
@@ -1938,7 +1913,7 @@ class AgentLoop:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"未知命令：{arg_raw}\n用法：/menu help",
+            content=f"未知命令：{arg_raw}\n用法：/memu help",
         )
 
     def _is_systemd_managed(self) -> bool:
@@ -1951,7 +1926,7 @@ class AgentLoop:
 
     def _schedule_self_restart(self, *, delay: float = 1.0) -> None:
         def _restart_now() -> None:
-            logger.warning("Restart requested via /menu restart; exiting with code 1 for supervisor restart.")
+            logger.warning("Restart requested via /memu restart; exiting with code 1 for supervisor restart.")
             os._exit(1)
 
         asyncio.get_running_loop().call_later(delay, _restart_now)
@@ -2046,14 +2021,14 @@ class AgentLoop:
         if compact_response:
             return compact_response
 
-        # Handle /version command before LLM
-        menu_response = await self._handle_menu_command(msg)
-        if menu_response:
+        # Handle /memu command (包括原 /menu 功能)
+        memu_full_response = await self._handle_memu_command_full(msg)
+        if memu_full_response:
             session = self.sessions.get_or_create(msg.session_key)
             session.add_message("user", msg.content)
-            session.add_message("assistant", menu_response.content)
+            session.add_message("assistant", memu_full_response.content)
             self.sessions.save(session)
-            return menu_response
+            return memu_full_response
 
         # Handle /version command before LLM
         version_response = self._handle_version_command(msg)
