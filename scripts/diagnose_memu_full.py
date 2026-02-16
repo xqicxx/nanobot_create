@@ -46,9 +46,33 @@ print_test("配置文件存在", config_path.exists(), str(config_path))
 workspace = Path.home() / ".nanobot" / "workspace"
 print_test("工作空间存在", workspace.exists(), str(workspace))
 
-# 检查 API Keys
+# 检查 API Keys - 优先从配置文件读取
 deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
 silicon_key = os.environ.get("SILICONFLOW_API_KEY", "")
+silicon_base_url = "https://api.siliconflow.cn/v1"  # 默认值
+silicon_embed_model = "BAAI/bge-m3"  # 默认值
+
+# 从配置文件读取
+if config_path.exists():
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+        memu = config.get("memu", {})
+
+        # DeepSeek 配置
+        default_cfg = memu.get("default", {})
+        if not deepseek_key:
+            deepseek_key = default_cfg.get("apiKey", "")
+
+        # SiliconFlow 配置
+        embedding_cfg = memu.get("embedding", {})
+        if not silicon_key:
+            silicon_key = embedding_cfg.get("apiKey", "")
+        silicon_base_url = embedding_cfg.get("baseUrl", "https://api.siliconflow.cn/v1")
+        silicon_embed_model = embedding_cfg.get("embedModel", "BAAI/bge-m3")
+    except Exception as e:
+        print(f"读取配置失败: {e}")
+
 print_test("DeepSeek API Key", bool(deepseek_key and len(deepseek_key) > 20))
 print_test("SiliconFlow API Key", bool(silicon_key and len(silicon_key) > 20))
 
@@ -75,10 +99,10 @@ except Exception as e:
 # ============================================================================
 print_header("3. 初始化 MemoryAgent")
 
-# 设置 SiliconFlow 环境变量用于 embedding
+# 设置 SiliconFlow 环境变量用于 embedding（使用配置文件的值）
 os.environ["SILICONFLOW_API_KEY"] = silicon_key
-os.environ["SILICONFLOW_BASE_URL"] = "https://api.siliconflow.cn/v1"
-os.environ["SILICONFLOW_EMBED_MODEL"] = "BAAI/bge-m3"
+os.environ["SILICONFLOW_BASE_URL"] = silicon_base_url
+os.environ["SILICONFLOW_EMBED_MODEL"] = silicon_embed_model
 os.environ["MEMU_EMBEDDING_PROVIDER"] = "openai"  # SiliconFlow 兼容 OpenAI API
 
 try:
