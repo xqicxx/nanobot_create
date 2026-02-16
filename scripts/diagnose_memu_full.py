@@ -58,10 +58,10 @@ print_test("SiliconFlow API Key", bool(silicon_key and len(silicon_key) > 20))
 print_header("2. memU 模块导入")
 
 try:
-    from memu.app.service import MemoryService
-    print_test("MemoryService 导入", True)
+    from memu.memory import MemoryAgent
+    print_test("MemoryAgent 导入", True)
 except Exception as e:
-    print_test("MemoryService 导入", False, str(e))
+    print_test("MemoryAgent 导入", False, str(e))
     sys.exit(1)
 
 try:
@@ -71,9 +71,9 @@ except Exception as e:
     print_test("DeepSeekClient 导入", False, str(e))
 
 # ============================================================================
-# 3. 初始化 MemoryService
+# 3. 初始化 MemoryAgent
 # ============================================================================
-print_header("3. 初始化 MemoryService")
+print_header("3. 初始化 MemoryAgent")
 
 try:
     # 配置 LLM
@@ -84,20 +84,22 @@ try:
     )
     print_test("LLM Client 创建", True)
 
-    # 创建服务
-    service = MemoryService(
+    # 创建 MemoryAgent
+    agent = MemoryAgent(
         llm_client=llm_client,
         memory_dir=str(workspace / ".memu" / "memory"),
         enable_embeddings=True,
+        agent_id="diagnose",
+        user_id="default",
     )
-    print_test("MemoryService 创建", True)
+    print_test("MemoryAgent 创建", True)
 
     # 获取状态
-    status = service.get_status()
-    print_test("服务状态获取", True, json.dumps(status, ensure_ascii=False)[:100])
+    status = agent.get_status()
+    print_test("Agent 状态获取", True, json.dumps(status, ensure_ascii=False)[:100])
 
 except Exception as e:
-    print_test("MemoryService 初始化", False, str(e))
+    print_test("MemoryAgent 初始化", False, str(e))
     import traceback
     traceback.print_exc()
     sys.exit(1)
@@ -109,6 +111,9 @@ except Exception as e:
 async def run_tests():
     print_header("4. 功能测试")
 
+    # 使用 agent 代替 service
+    global agent
+
     # ------------------------------------------------------------------
     # 4.1 memorize() - 写入记忆
     # ------------------------------------------------------------------
@@ -116,25 +121,20 @@ async def run_tests():
     test_memory = f"测试记忆 - 健身爱好 - {datetime.now().strftime('%H:%M:%S')}"
 
     try:
-        result = await service.memorize(
-            resource_url=None,  # 直接传内容
-            modality="conversation",
-            user={"user_id": "diagnose_test"},
-            conversation=[
-                {"role": "user", "content": "我喜欢健身"},
-                {"role": "assistant", "content": "很好，健身有助于健康"},
-            ],
+        # MemoryAgent 使用 run() 方法进行记忆
+        conversation = [
+            {"role": "user", "content": "我喜欢健身"},
+            {"role": "assistant", "content": "很好，健身有助于健康"},
+        ]
+        result = agent.run(
+            conversation=conversation,
+            character_name="diagnose_test",
+            max_iterations=3,
         )
 
         success = result.get("success", False)
-        items_count = len(result.get("items", []))
-        print_test("memorize() 执行", success, f"提取了 {items_count} 条记忆")
-
-        # 检查是否写入数据库
-        if success:
-            print_test("memorize() 写入成功", True, f"items: {items_count}")
-        else:
-            print_test("memorize() 写入失败", False, str(result.get("error")))
+        function_calls = result.get("function_calls", [])
+        print_test("memorize() 执行", success, f"success={success}, function_calls={len(function_calls)}")
 
     except Exception as e:
         print_test("memorize() 执行", False, str(e))
@@ -145,7 +145,8 @@ async def run_tests():
     print("\n## 4.2 retrieve() - 语义检索")
 
     try:
-        result = await service.retrieve(
+        # MemoryAgent 的 retrieve 方法
+        result = await agent.retrieve(
             query="健身",
             method="rag",
             user={"user_id": "diagnose_test"},
@@ -170,16 +171,12 @@ async def run_tests():
     print("\n## 4.3 list_memory_items() - 列出记忆")
 
     try:
-        items = await service.list_memory_items(
-            user={"user_id": "diagnose_test"},
-            limit=10,
-        )
-
-        print_test("list_memory_items() 执行", True, f"返回 {len(items)} 条")
-
-        for item in items[:3]:
-            content = item.get("content", "")[:80]
-            print(f"   - {content}")
+        # 使用 storage_manager 直接读取
+        if hasattr(agent, 'storage_manager'):
+            items = agent.storage_manager.list_memory_items(user_id="diagnose_test")
+            print_test("list_memory_items() 执行", True, f"返回 {len(items)} 条")
+        else:
+            print_test("list_memory_items() 执行", False, "storage_manager 不可用")
 
     except Exception as e:
         print_test("list_memory_items() 执行", False, str(e))
@@ -190,16 +187,11 @@ async def run_tests():
     print("\n## 4.4 list_categories() - 列出分类")
 
     try:
-        categories = await service.list_memory_categories(
-            user={"user_id": "diagnose_test"},
-        )
-
-        print_test("list_categories() 执行", True, f"返回 {len(categories)} 个分类")
-
-        for cat in categories[:5]:
-            name = cat.get("name", "")
-            summary = cat.get("summary", "")[:80]
-            print(f"   - {name}: {summary}")
+        if hasattr(agent, 'storage_manager'):
+            categories = agent.storage_manager.list_memory_categories(user_id="diagnose_test")
+            print_test("list_categories() 执行", True, f"返回 {len(categories)} 个分类")
+        else:
+            print_test("list_categories() 执行", False, "storage_manager 不可用")
 
     except Exception as e:
         print_test("list_categories() 执行", False, str(e))
@@ -212,17 +204,14 @@ async def run_tests():
     try:
         # 写入相同内容两次，测试强化
         for i in range(2):
-            await service.memorize(
-                resource_url=None,
-                modality="conversation",
-                user={"user_id": "reinforce_test"},
-                conversation=[
-                    {"role": "user", "content": "强化测试内容 - 喜欢跑步"},
-                ],
+            await agent.run(
+                conversation=[{"role": "user", "content": "强化测试内容 - 喜欢跑步"}],
+                character_name="reinforce_test",
+                max_iterations=2,
             )
 
         # 检索测试
-        result = await service.retrieve(
+        result = await agent.retrieve(
             query="跑步",
             method="rag",
             user={"user_id": "reinforce_test"},
@@ -241,26 +230,20 @@ async def run_tests():
 
     try:
         # 写入不同内容
-        await service.memorize(
-            resource_url=None,
-            modality="conversation",
-            user={"user_id": "salience_test"},
-            conversation=[
-                {"role": "user", "content": "今天很重要：我要学习Python编程"},
-            ],
+        await agent.run(
+            conversation=[{"role": "user", "content": "今天很重要：我要学习Python编程"}],
+            character_name="salience_test",
+            max_iterations=2,
         )
 
-        await service.memorize(
-            resource_url=None,
-            modality="conversation",
-            user={"user_id": "salience_test"},
-            conversation=[
-                {"role": "user", "content": "随便说说的不重要的话"},
-            ],
+        await agent.run(
+            conversation=[{"role": "user", "content": "随便说说的不重要的话"}],
+            character_name="salience_test",
+            max_iterations=2,
         )
 
         # 检索
-        result = await service.retrieve(
+        result = await agent.retrieve(
             query="学习",
             method="rag",
             user={"user_id": "salience_test"},
@@ -278,7 +261,7 @@ async def run_tests():
     print("\n## 4.7 多模态配置")
 
     try:
-        from memu.app.settings import load_enable_video_from_config
+        from memu.settings import load_enable_video_from_config
         video_enabled = load_enable_video_from_config()
         print_test("多模态视频配置", True, f"enable_video: {video_enabled}")
 
