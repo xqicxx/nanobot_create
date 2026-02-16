@@ -229,47 +229,45 @@ class MemoryAdapter:
             user_id = self.build_user_id(channel, chat_id, sender_id)
             memory_dir = self.workspace / ".memu" / "memory"
             user_memory_dir = memory_dir / "nanobot" / user_id
-            
+
             logger.debug(f"Looking for memories in: {user_memory_dir}")
-            
-            if not user_memory_dir.exists():
-                logger.debug(f"Memory directory not found: {user_memory_dir}")
-                # Try to find any memory directories
-                if memory_dir.exists():
-                    import os
-                    for root, dirs, files in os.walk(memory_dir):
-                        if files:
-                            logger.debug(f"Found files in: {root} - {files}")
-                return MemoryContext(text="")
-            
-            # Read all memory files
+
+            # 如果精确路径不存在，尝试其他可能的位置
+            search_dirs = [user_memory_dir]
+
+            # 尝试默认用户目录
+            default_dir = memory_dir / "nanobot" / "default"
+            if default_dir.exists() and default_dir not in search_dirs:
+                search_dirs.append(default_dir)
+
+            # 尝试查找所有包含 .md 文件的目录
+            if memory_dir.exists():
+                import os
+                for root, dirs, files in os.walk(memory_dir):
+                    if any(f.endswith('.md') for f in files):
+                        dir_path = Path(root)
+                        if dir_path not in search_dirs:
+                            search_dirs.append(dir_path)
+
+            # 尝试所有可能的目录
             memories = []
             memory_files = {
                 "profile": "个人档案",
-                "event": "重要事件", 
+                "event": "重要事件",
                 "reminder": "提醒事项",
                 "interest": "兴趣爱好",
                 "study": "学习记录",
                 "activity": "活动记录"
             }
-            
-            # Try to use MemoryAgent's storage_manager if available
-            if self._memory_agent and hasattr(self._memory_agent, 'storage_manager'):
-                try:
-                    for category, label in memory_files.items():
-                        content = self._memory_agent.storage_manager.read_memory_file(category)
-                        if content and len(content) > 10:
-                            lines = [line.strip() for line in content.split("\n") if line.strip()]
-                            if lines:
-                                summary = "; ".join(lines[:3])
-                                memories.append(f"[{label}] {summary}")
-                except Exception as e:
-                    logger.debug(f"Failed to read via storage_manager: {e}, falling back to direct file read")
-            
-            # Fallback: direct file read
-            if not memories:
+
+            for search_dir in search_dirs:
+                if not search_dir.exists():
+                    continue
+
+                logger.debug(f"Searching in: {search_dir}")
+
                 for category, label in memory_files.items():
-                    file_path = user_memory_dir / f"{category}.md"
+                    file_path = search_dir / f"{category}.md"
                     if file_path.exists():
                         try:
                             content = file_path.read_text(encoding="utf-8").strip()
@@ -278,12 +276,17 @@ class MemoryAdapter:
                                 if lines:
                                     summary = "; ".join(lines[:3])
                                     memories.append(f"[{label}] {summary}")
+                                    logger.debug(f"Found memory in {file_path.name}: {summary[:50]}...")
                         except Exception as e:
                             logger.debug(f"Failed to read {file_path}: {e}")
-            
+
+                if memories:
+                    break  # 找到记忆就停止
+
             if not memories:
+                logger.debug("No memory files found in any search directory")
                 return MemoryContext(text="")
-            
+
             # Format as context
             context_text = "# 历史记忆\n" + "\n".join(f"- {m}" for m in memories[:self.retrieve_top_k])
             return MemoryContext(text=context_text)
