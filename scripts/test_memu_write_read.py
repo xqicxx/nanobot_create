@@ -2,6 +2,12 @@
 """测试 memU 写入和读取"""
 import os
 import sys
+import subprocess
+
+# 使用虚拟环境的 Python
+venv_python = "/root/nanobot-venv/bin/python"
+if os.path.exists(venv_python) and os.path.abspath(sys.executable) != os.path.abspath(venv_python):
+    os.execv(venv_python, [venv_python, __file__] + sys.argv[1:])
 
 # 设置环境变量
 os.environ['MEMU_EMBEDDING_MODEL'] = 'BAAI/bge-m3'
