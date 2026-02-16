@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -15,6 +16,13 @@ from typing import Any, TYPE_CHECKING
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
+
+# === 高性能组件 ===
+from nanobot.agent.memory_performance import MemUPerformanceConfig
+from nanobot.agent.memory_decider import MemoryTriggerDecider, TriggerResult
+from nanobot.agent.memory_cache import EmbeddingCache, RetrievalCache
+from nanobot.agent.memory_throttle import RetrieveThrottler
+from nanobot.agent.memory_queue import MemoryWriteQueue
 
 if TYPE_CHECKING:
     from nanobot.config.schema import MemuConfig, MemuLLMConfig
@@ -52,6 +60,7 @@ class MemoryAdapter:
         retrieve_top_k: int = 5,
         enable_memory: bool = True,
         memu_config: "MemuConfig | None" = None,
+        performance_config: MemUPerformanceConfig | None = None,
     ):
         self.workspace = workspace
         self.retrieve_top_k = retrieve_top_k
@@ -66,8 +75,70 @@ class MemoryAdapter:
         self.resources_dir = ensure_dir(resources_dir or (workspace / ".memu" / "resources"))
         self.memu_config = memu_config
         self._memory_agent = memu_service
+
+        # === 高性能组件初始化 ===
+        self._perf_config = performance_config or MemUPerformanceConfig()
+
+        # 触发决策器
+        self._decider = MemoryTriggerDecider()
+
+        # 缓存
+        self._embedding_cache: EmbeddingCache | None = None
+        self._retrieval_cache: RetrievalCache | None = None
+        if self._perf_config.embedding_cache_enabled:
+            self._embedding_cache = EmbeddingCache(
+                max_size=self._perf_config.embedding_cache_size,
+                ttl=self._perf_config.embedding_cache_ttl,
+            )
+            self._retrieval_cache = RetrievalCache(max_size=100, ttl=300)
+
+        # 节流器
+        self._throttler = RetrieveThrottler(
+            max_per_step=self._perf_config.retrieve_throttle_per_step,
+            max_per_minute=self._perf_config.retrieve_throttle_per_minute,
+            cooldown_seconds=self._perf_config.retrieve_cooldown_seconds,
+        )
+
+        # 写入队列
+        self._write_queue: MemoryWriteQueue | None = None
+        if self._perf_config.write_queue_enabled:
+            self._write_queue = MemoryWriteQueue(
+                batch_size=self._perf_config.write_batch_size,
+                flush_interval=self._perf_config.write_flush_interval,
+                max_queue_size=self._perf_config.write_max_queue_size,
+            )
+            # 设置写入回调
+            self._write_queue.set_flush_callback(self._async_write_memory)
+
+        # === 初始化 MemoryAgent ===
         if self._memory_agent is None and self.enable_memory:
             self._init_agents()
+
+    async def _async_write_memory(
+        self,
+        content: str,
+        category: str,
+        user_id: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """异步写入记忆（供队列调用）"""
+        if not self._memory_agent:
+            return
+
+        try:
+            conversation = [
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "已记录"},
+            ]
+            result = await asyncio.to_thread(
+                self._memory_agent.run,
+                conversation=conversation,
+                character_name=user_id,
+                max_iterations=2,  # 队列写入用较少迭代
+            )
+            logger.debug(f"队列写入完成: {result.get('success')}")
+        except Exception as e:
+            logger.warning(f"队列写入失败: {e}")
 
     def _init_agents(self) -> None:
         """Initialize MemoryAgent with LLM client."""
@@ -212,7 +283,7 @@ class MemoryAdapter:
         full_retrieve: bool = False,
     ) -> MemoryContext:
         """Retrieve memory context from files.
-        
+
         In memu-py 0.2.x, memories are stored as markdown files.
         This method reads the memory files directly.
         """
@@ -220,7 +291,17 @@ class MemoryAdapter:
         # We can read files even if MemoryAgent failed to initialize
         if not self.enable_memory:
             return MemoryContext(text="")
-        
+
+        # === 高性能：触发判断 + 节流 ===
+        if self._perf_config.enable_trigger_rules:
+            trigger = self.should_retrieve(current_message, history)
+            if not trigger.should_trigger:
+                # logger.debug(f"检索跳过: {trigger.reason}")
+                return MemoryContext(text="")
+
+            # 记录检索（用于节流）
+            self.record_retrieve(current_message)
+
         if self.should_skip_retrieve(current_message):
             return MemoryContext(text="")
         
@@ -306,12 +387,24 @@ class MemoryAdapter:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Memorize a conversation turn.
-        
+
         Note: In memu-py 0.2.x, memorization is done via run() method.
         This method uses run() to process the conversation.
         """
         if not self.enable_memory or self._memory_agent is None:
             return
+
+        # === 高性能：触发判断 ===
+        if self._perf_config.enable_trigger_rules:
+            trigger = self.should_memorize(user_message)
+            if not trigger.should_trigger:
+                # logger.debug(f"写入跳过: {trigger.reason}")
+                return
+
+            # 使用触发决策器推断分类
+            category = self._decider.get_category_from_message(user_message)
+        else:
+            category = "activity"
 
         user_id = self.build_user_id(channel, chat_id, sender_id)
 
@@ -361,7 +454,6 @@ class MemoryAdapter:
             return
 
         # Run memory processing in background (async) to not block user response
-        import asyncio
         async def run_memorize():
             try:
                 result = await asyncio.to_thread(
@@ -537,3 +629,84 @@ class MemoryAdapter:
             return False
         text_lower = text_raw.lower()
         return any(re.search(pattern, text_lower, re.IGNORECASE) for pattern in _DEEP_RECALL_PATTERNS)
+
+    # === 高性能 API ===
+
+    def should_memorize(self, message: str, conversation: list[dict] | None = None) -> TriggerResult:
+        """判断是否应该写入记忆（高性能触发决策）"""
+        if not self._perf_config.enable_trigger_rules:
+            # 如果没有启用触发规则，默认写入
+            return TriggerResult(True, "触发规则未启用", 5)
+
+        # 使用决策器判断
+        return self._decider.should_memorize(message, conversation)
+
+    def should_retrieve(self, query: str, history: list[dict] | None = None) -> TriggerResult:
+        """判断是否应该检索记忆（高性能触发决策 + 节流）"""
+        if not self._perf_config.enable_trigger_rules:
+            # 如果没有启用触发规则，默认检索
+            return TriggerResult(True, "触发规则未启用", 5)
+
+        # 1. 触发规则判断
+        trigger_result = self._decider.should_retrieve(query, history)
+        if not trigger_result.should_trigger:
+            return trigger_result
+
+        # 2. 节流器判断
+        if not self._throttler.can_retrieve(query):
+            return TriggerResult(False, "节流限制", strategy="throttled")
+
+        return trigger_result
+
+    def record_retrieve(self, query: str) -> None:
+        """记录一次检索（用于节流计数）"""
+        self._throttler.record_retrieve(query)
+
+    def reset_per_step(self) -> None:
+        """每轮重置（调用时机：在每个 step 开始时）"""
+        self._throttler.reset_per_step()
+
+    async def memorize_queued(
+        self,
+        content: str,
+        category: str,
+        user_id: str,
+        priority: int = 0,
+    ) -> None:
+        """加入延迟写入队列"""
+        if not self._write_queue:
+            return
+
+        await self._write_queue.enqueue(
+            content=content,
+            category=category,
+            user_id=user_id,
+            priority=priority,
+        )
+
+    async def flush_write_queue(self) -> None:
+        """强制刷新写入队列"""
+        if self._write_queue:
+            await self._write_queue.flush()
+
+    def get_performance_stats(self) -> dict:
+        """获取性能统计"""
+        stats = {
+            "throttler": {
+                "step_count": self._throttler.get_stats().step_count,
+                "cooldown_hits": self._throttler.get_stats().cooldown_hits,
+            },
+            "caches": {
+                "embedding_cache_size": self._embedding_cache.size() if self._embedding_cache else 0,
+                "retrieval_cache_size": self._retrieval_cache.size() if self._retrieval_cache else 0,
+            },
+        }
+        if self._write_queue:
+            ws_stats = self._write_queue.get_stats()
+            stats["write_queue"] = {
+                "size": self._write_queue.size(),
+                "enqueued": ws_stats.enqueued,
+                "flushed": ws_stats.flushed,
+                "failed": ws_stats.failed,
+            }
+        return stats
