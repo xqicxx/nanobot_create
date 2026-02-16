@@ -40,72 +40,67 @@ class MemoryRetrieveTool(Tool):
     
     async def execute(self, **kwargs: Any) -> str:
         query = kwargs.get("query", "")
-        """Execute memory retrieval."""
+        """Execute memory retrieval using memU semantic search."""
         if not self.memory_adapter or not self.memory_adapter.enable_memory:
             return "Memory system is not enabled."
 
         try:
             import asyncio
 
-            # Get memory status to check if there are any memories
+            # Get memory status
             status = await self.memory_adapter.memu_status()
             if not status.get("enabled"):
                 return "Memory system is currently disabled."
 
-            # Try to read memory files directly
-            memory_dir = self.memory_adapter.workspace / ".memu" / "memory"
-            if not memory_dir.exists():
-                return "No memories stored yet. This is a new conversation."
+            # Check if MemoryAgent is available for semantic retrieval
+            if not self.memory_adapter._memory_agent:
+                return "MemoryAgent not initialized. No memories to retrieve."
 
-            # Find all memory files
-            memories = []
-            memory_files = {
-                "profile": "个人档案",
-                "event": "重要事件",
-                "reminder": "提醒事项",
-                "interest": "兴趣爱好",
-                "study": "学习记录",
-                "activity": "活动记录"
-            }
+            # Use memU's built-in semantic retrieval
+            try:
+                result = await asyncio.wait_for(
+                    self.memory_adapter._memory_agent.retrieve(
+                        query=query,
+                        method="rag",  # Fast RAG mode
+                        user={"user_id": "default"},
+                    ),
+                    timeout=10.0,
+                )
 
-            # If there's a query, do keyword search
-            query_lower = query.lower() if query else ""
+                items = result.get("items", [])
+                categories = result.get("categories", [])
 
-            # Try different user directories
-            for user_dir in memory_dir.rglob("*"):
-                if user_dir.is_dir():
-                    for category, label in memory_files.items():
-                        file_path = user_dir / f"{category}.md"
-                        if file_path.exists():
-                            try:
-                                content = file_path.read_text(encoding="utf-8").strip()
-                                if content and len(content) > 10:
-                                    # If there's a query, filter by keyword
-                                    if query_lower:
-                                        # Search for query in content (case insensitive)
-                                        if query_lower not in content.lower():
-                                            continue  # Skip if query not found
-                                        # Find matching lines
-                                        lines = [line.strip() for line in content.split("\n") if line.strip() and query_lower in line.lower()]
-                                        if lines:
-                                            summary = "; ".join(lines[:10])
-                                            memories.append(f"[{label}] {summary}")
-                                    else:
-                                        # No query, return all (read more lines)
-                                        lines = [line.strip() for line in content.split("\n") if line.strip()]
-                                        if lines:
-                                            summary = "; ".join(lines[:20])  # Read 20 lines when no query
-                                            memories.append(f"[{label}] {summary}")
-                            except Exception:
-                                pass
+                if not items and not categories:
+                    return f"No memories found for query: '{query}'"
 
-            if not memories:
-                return "No memories found for this query."
+                # Format results
+                lines = []
+                if categories:
+                    for cat in categories[:5]:
+                        name = cat.get("name", "")
+                        summary = cat.get("summary", "")[:200]
+                        if summary:
+                            lines.append(f"[分类: {name}] {summary}")
 
-            return "Found memories:\n" + "\n".join(f"- {m}" for m in memories[:10])
-            
+                if items:
+                    for item in items[:5]:
+                        content = item.get("content", "")[:200]
+                        memory_type = item.get("memory_type", "")
+                        if content:
+                            lines.append(f"[{memory_type}] {content}")
+
+                if not lines:
+                    return f"No memories found for query: '{query}'"
+
+                return "找到记忆:\n" + "\n".join(lines[:5])  # Top 5 results
+
+            except asyncio.TimeoutError:
+                return "Memory retrieval timed out. Please try again."
+            except Exception as e:
+                return f"Error retrieving memories: {str(e)}"
+
         except Exception as e:
-            return f"Error retrieving memories: {str(e)}"
+            return f"Error: {str(e)}
 
 
 class MemorySaveTool(Tool):
