@@ -374,8 +374,6 @@ class MemoryAdapter:
         # Schedule background task without waiting
         asyncio.create_task(run_memorize())
         return  # Return immediately to user
-        except Exception as exc:
-            logger.warning(f"MemU memorize failed: {exc}")
 
     def _save_to_file(self, *, channel, chat_id, sender_id, user_message, assistant_message):
         """Save conversation to file directly (fallback when MemoryAgent not available)."""
