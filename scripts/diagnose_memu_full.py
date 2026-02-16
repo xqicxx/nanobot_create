@@ -18,7 +18,9 @@ if os.path.exists(VENV_PYTHON) and os.path.abspath(sys.executable) != os.path.ab
     os.execv(VENV_PYTHON, [VENV_PYTHON, __file__] + sys.argv[1:])
 
 sys.path.insert(0, "/root/nanoBot_memU/nanobot")
-sys.path.insert(0, "/root/nanoBot_memU/memu_test/src")
+
+# memu-py 是已安装的包，不需要额外添加路径
+# 导入方式: from memu.app.service import MemoryService
 
 def print_header(title):
     print("\n" + "=" * 70)
