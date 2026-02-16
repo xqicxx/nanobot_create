@@ -26,22 +26,27 @@ def main():
     )
 
     print("=" * 50)
-    print("测试1: 写入记忆")
+    print("测试1: 写入记忆 (减少迭代以加快速度)")
     print("=" * 50)
 
-    # 测试写入
-    asyncio.run(adapter.memorize_turn(
-        channel='cli',
-        chat_id='test',
-        sender_id='user',
-        user_message='我喜欢吃苹果',
-        assistant_message='好的，我记住了！',
-    ))
+    # 测试写入 - 直接调用 agent.run 减少迭代
+    if adapter._memory_agent:
+        conversation = [
+            {"role": "user", "content": "我喜欢吃苹果"},
+            {"role": "assistant", "content": "好的，我记住了！"},
+        ]
+        result = adapter._memory_agent.run(
+            conversation=conversation,
+            character_name="cli:test:user",
+            max_iterations=2,  # 减少到2轮，加快测试
+        )
+        print(f"写入结果: {result.get('success')}, function_calls: {len(result.get('function_calls', []))}")
     print("写入完成，等待处理...")
 
     # 等待一下让后台任务完成
     import time
-    time.sleep(3)
+    print("等待记忆处理完成...")
+    time.sleep(15)  # 等待更长时间
 
     print("\n" + "=" * 50)
     print("测试2: 读取记忆")
