@@ -53,54 +53,99 @@ class MemoryRetrieveTool(Tool):
                 return "Memory system is currently disabled."
 
             # Check if MemoryAgent is available for semantic retrieval
-            if not self.memory_adapter._memory_agent:
+            agent = self.memory_adapter._memory_agent
+            if not agent:
                 return "MemoryAgent not initialized. No memories to retrieve."
 
-            # Use memU's built-in semantic retrieval
+            # 方法1: 尝试通过 memory_core 或 core 检索
             try:
-                result = await asyncio.wait_for(
-                    self.memory_adapter._memory_agent.retrieve(
-                        query=query,
-                        method="rag",  # Fast RAG mode
-                        user={"user_id": "default"},
-                    ),
-                    timeout=10.0,
-                )
+                # 尝试不同的 API
+                if hasattr(agent, 'memory_core') and hasattr(agent.memory_core, 'retrieve'):
+                    result = await asyncio.wait_for(
+                        agent.memory_core.retrieve(
+                            query=query,
+                            user_id="default",
+                        ),
+                        timeout=10.0,
+                    )
+                elif hasattr(agent, 'core') and hasattr(agent.core, 'retrieve'):
+                    result = await asyncio.wait_for(
+                        agent.core.retrieve(
+                            query=query,
+                            user_id="default",
+                        ),
+                        timeout=10.0,
+                    )
+                else:
+                    raise AttributeError("No retrieve method found")
 
                 items = result.get("items", [])
                 categories = result.get("categories", [])
 
-                if not items and not categories:
+                if items or categories:
+                    lines = []
+                    if categories:
+                        for cat in categories[:5]:
+                            name = cat.get("name", "")
+                            summary = cat.get("summary", "")[:200]
+                            if summary:
+                                lines.append(f"[分类: {name}] {summary}")
+
+                    if items:
+                        for item in items[:5]:
+                            content = item.get("content", "")[:200]
+                            memory_type = item.get("memory_type", "")
+                            if content:
+                                lines.append(f"[{memory_type}] {content}")
+
+                    if lines:
+                        return "找到记忆:\n" + "\n".join(lines[:5])
+
+            except AttributeError:
+                pass  # 没有retrieve方法，继续降级方案
+
+            # 方法2: 降级到文件检索
+            try:
+                memory_dir = self.memory_adapter.workspace / ".memu" / "memory"
+                user_dir = memory_dir / "nanobot" / "default:unknown:system"
+
+                if not user_dir.exists():
                     return f"No memories found for query: '{query}'"
 
-                # Format results
+                # 读取所有记忆文件
                 lines = []
-                if categories:
-                    for cat in categories[:5]:
-                        name = cat.get("name", "")
-                        summary = cat.get("summary", "")[:200]
-                        if summary:
-                            lines.append(f"[分类: {name}] {summary}")
+                memory_files = {
+                    "profile": "个人档案",
+                    "event": "重要事件",
+                    "reminder": "提醒事项",
+                    "interest": "兴趣爱好",
+                    "study": "学习记录",
+                    "activity": "活动记录"
+                }
 
-                if items:
-                    for item in items[:5]:
-                        content = item.get("content", "")[:200]
-                        memory_type = item.get("memory_type", "")
-                        if content:
-                            lines.append(f"[{memory_type}] {content}")
+                for category, label in memory_files.items():
+                    file_path = user_dir / f"{category}.md"
+                    if file_path.exists():
+                        try:
+                            content = file_path.read_text(encoding="utf-8").strip()
+                            if content and len(content) > 10:
+                                # 取前几行作为摘要
+                                content_lines = [l.strip() for l in content.split("\n") if l.strip()]
+                                summary = "; ".join(content_lines[:3])
+                                lines.append(f"[{label}] {summary}")
+                        except Exception:
+                            pass
 
                 if not lines:
                     return f"No memories found for query: '{query}'"
 
-                return "找到记忆:\n" + "\n".join(lines[:5])  # Top 5 results
+                return "找到记忆:\n" + "\n".join(lines[:5])
 
-            except asyncio.TimeoutError:
-                return "Memory retrieval timed out. Please try again."
             except Exception as e:
-                return f"Error retrieving memories: {str(e)}"
+                return f"Error retrieving from files: {str(e)}"
 
         except Exception as e:
-            return f"Error: {str(e)}
+            return f"Error: {str(e)}"
 
 
 class MemorySaveTool(Tool):

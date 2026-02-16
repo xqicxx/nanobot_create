@@ -71,6 +71,9 @@ class MemoryAdapter:
 
     def _init_agents(self) -> None:
         """Initialize MemoryAgent with LLM client."""
+        # 关键：必须在导入 memu 之前设置环境变量！
+        self._setup_embedding_env()
+
         try:
             from memu.memory import MemoryAgent
             from memu.llm import OpenAIClient, DeepSeekClient
@@ -80,9 +83,6 @@ class MemoryAdapter:
             # 不设置 enable_memory = False，继续使用文件模式
             self._memory_agent = None
             return
-
-        # Setup embedding configuration
-        self._setup_embedding_env()
 
         # Build LLM client from config
         llm_client = self._create_llm_client()
@@ -161,11 +161,12 @@ class MemoryAdapter:
         """Setup embedding environment variables from config for memu-py 0.2.x."""
         memu_cfg = self.memu_config
         embedding_cfg = getattr(memu_cfg, "embedding", None) if memu_cfg else None
-        
+
         if embedding_cfg:
-            api_key = getattr(embedding_cfg, "api_key", "")
-            base_url = getattr(embedding_cfg, "base_url", "")
-            embed_model = getattr(embedding_cfg, "embed_model", "BAAI/bge-m3")
+            # 兼容驼峰和下划线命名 (config.json 用 embedModel，代码用 embed_model)
+            api_key = getattr(embedding_cfg, "api_key", "") or getattr(embedding_cfg, "apiKey", "")
+            base_url = getattr(embedding_cfg, "base_url", "") or getattr(embedding_cfg, "baseUrl", "")
+            embed_model = getattr(embedding_cfg, "embed_model", "") or getattr(embedding_cfg, "embedModel", "") or "BAAI/bge-m3"
             
             # Set environment variables for memu-py 0.2.x
             # Note: memu-py 0.2.x uses different env vars than 0.1.x
