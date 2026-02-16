@@ -43,33 +43,34 @@ class MemoryRetrieveTool(Tool):
         """Execute memory retrieval."""
         if not self.memory_adapter or not self.memory_adapter.enable_memory:
             return "Memory system is not enabled."
-        
+
         try:
-            # For now, return all memories as context
-            # In the future, this could do semantic search
             import asyncio
-            
+
             # Get memory status to check if there are any memories
             status = await self.memory_adapter.memu_status()
             if not status.get("enabled"):
                 return "Memory system is currently disabled."
-            
+
             # Try to read memory files directly
             memory_dir = self.memory_adapter.workspace / ".memu" / "memory"
             if not memory_dir.exists():
                 return "No memories stored yet. This is a new conversation."
-            
+
             # Find all memory files
             memories = []
             memory_files = {
                 "profile": "个人档案",
-                "event": "重要事件", 
+                "event": "重要事件",
                 "reminder": "提醒事项",
                 "interest": "兴趣爱好",
                 "study": "学习记录",
                 "activity": "活动记录"
             }
-            
+
+            # If there's a query, do keyword search
+            query_lower = query.lower() if query else ""
+
             # Try different user directories
             for user_dir in memory_dir.rglob("*"):
                 if user_dir.is_dir():
@@ -79,16 +80,28 @@ class MemoryRetrieveTool(Tool):
                             try:
                                 content = file_path.read_text(encoding="utf-8").strip()
                                 if content and len(content) > 10:
-                                    lines = [line.strip() for line in content.split("\n") if line.strip()]
-                                    if lines:
-                                        summary = "; ".join(lines[:5])  # First 5 lines
-                                        memories.append(f"[{label}] {summary}")
+                                    # If there's a query, filter by keyword
+                                    if query_lower:
+                                        # Search for query in content (case insensitive)
+                                        if query_lower not in content.lower():
+                                            continue  # Skip if query not found
+                                        # Find matching lines
+                                        lines = [line.strip() for line in content.split("\n") if line.strip() and query_lower in line.lower()]
+                                        if lines:
+                                            summary = "; ".join(lines[:10])
+                                            memories.append(f"[{label}] {summary}")
+                                    else:
+                                        # No query, return all (read more lines)
+                                        lines = [line.strip() for line in content.split("\n") if line.strip()]
+                                        if lines:
+                                            summary = "; ".join(lines[:20])  # Read 20 lines when no query
+                                            memories.append(f"[{label}] {summary}")
                             except Exception:
                                 pass
-            
+
             if not memories:
-                return "No memories found for this query. This might be a new conversation or the memory system hasn't stored any data yet."
-            
+                return "No memories found for this query."
+
             return "Found memories:\n" + "\n".join(f"- {m}" for m in memories[:10])
             
         except Exception as e:
