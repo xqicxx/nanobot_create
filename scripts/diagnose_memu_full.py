@@ -75,6 +75,12 @@ except Exception as e:
 # ============================================================================
 print_header("3. 初始化 MemoryAgent")
 
+# 设置 SiliconFlow 环境变量用于 embedding
+os.environ["SILICONFLOW_API_KEY"] = silicon_key
+os.environ["SILICONFLOW_BASE_URL"] = "https://api.siliconflow.cn/v1"
+os.environ["SILICONFLOW_EMBED_MODEL"] = "BAAI/bge-m3"
+os.environ["MEMU_EMBEDDING_PROVIDER"] = "openai"  # SiliconFlow 兼容 OpenAI API
+
 try:
     # 配置 LLM
     llm_client = DeepSeekClient(
