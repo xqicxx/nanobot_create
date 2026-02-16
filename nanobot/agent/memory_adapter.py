@@ -356,14 +356,33 @@ class MemoryAdapter:
                 logger.warning(f"MemU file save failed: {exc}")
             return
 
-        try:
-            start = time.perf_counter()
-            result = self._memory_agent.run(
-                conversation=conversation,
-                character_name=user_id,
-                max_iterations=2,  # Reduced from 5 to 2 for faster performance
-            )
-            elapsed_ms = int(round((time.perf_counter() - start) * 1000))
+        # Run memory processing in background (async) to not block user response
+        import asyncio
+        async def run_memorize():
+            try:
+                result = await asyncio.to_thread(
+                    self._memory_agent.run,
+                    conversation=conversation,
+                    character_name=user_id,
+                    max_iterations=5,  # Full functionality
+                )
+                return result
+            except Exception as e:
+                logger.warning(f"Background memorize failed: {e}")
+                return None
+
+        # Schedule background task without waiting
+        asyncio.create_task(run_memorize())
+        return  # Return immediately to user
+
+        # 以下代码不会执行（上面已return）
+        start = time.perf_counter()
+        result = self._memory_agent.run(
+            conversation=conversation,
+            character_name=user_id,
+            max_iterations=5,
+        )
+        elapsed_ms = int(round((time.perf_counter() - start) * 1000))
             
             # Check if any function calls were made (indicates successful processing)
             function_calls = result.get("function_calls", [])
