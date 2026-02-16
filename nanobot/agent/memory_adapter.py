@@ -374,39 +374,6 @@ class MemoryAdapter:
         # Schedule background task without waiting
         asyncio.create_task(run_memorize())
         return  # Return immediately to user
-
-        # 以下代码不会执行（上面已return）
-        start = time.perf_counter()
-        result = self._memory_agent.run(
-            conversation=conversation,
-            character_name=user_id,
-            max_iterations=5,
-        )
-        elapsed_ms = int(round((time.perf_counter() - start) * 1000))
-            
-            # Check if any function calls were made (indicates successful processing)
-            function_calls = result.get("function_calls", [])
-            
-            if result.get("success") and function_calls:
-                logger.info(
-                    "MemU memorize in {}ms (channel={}, sender={}) - {} actions",
-                    elapsed_ms,
-                    channel,
-                    sender_id,
-                    len(function_calls),
-                )
-            elif result.get("success") and not function_calls:
-                # LLM call succeeded but no actions taken - likely API/auth issue
-                error_msg = result.get("error", "Unknown error")
-                logger.error(
-                    "MemU memorize API ERROR (channel={}, sender={}): {}. "
-                    "Check your DeepSeek API key configuration!",
-                    channel,
-                    sender_id,
-                    error_msg,
-                )
-            else:
-                logger.warning(f"MemU memorize failed: {result.get('error')}")
         except Exception as exc:
             logger.warning(f"MemU memorize failed: {exc}")
 
