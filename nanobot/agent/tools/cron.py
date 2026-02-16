@@ -40,7 +40,7 @@ class CronTool(Tool):
                 },
                 "message": {
                     "type": "string",
-                    "description": "Reminder message (for add)"
+                    "description": "Reminder message or task description (for add)"
                 },
                 "every_seconds": {
                     "type": "integer",
@@ -53,6 +53,18 @@ class CronTool(Tool):
                 "job_id": {
                     "type": "string",
                     "description": "Job ID (for remove)"
+                },
+                "deliver": {
+                    "type": "boolean",
+                    "description": "If true, send result to user (Reminder mode). If false, run silently (Task mode)"
+                },
+                "original_session_key": {
+                    "type": "string",
+                    "description": "Original user session key for context recovery (e.g., 'whatsapp:+1234567890'). If not provided, will use channel:chat_id"
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "User ID for memory retrieval (e.g., 'whatsapp:+1234567890:user')"
                 }
             },
             "required": ["action"]
@@ -65,22 +77,33 @@ class CronTool(Tool):
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         job_id: str | None = None,
+        deliver: bool = False,
+        original_session_key: str | None = None,
+        user_id: str | None = None,
         **kwargs: Any
     ) -> str:
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr)
+            return self._add_job(message, every_seconds, cron_expr, deliver, original_session_key, user_id)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
-    
-    def _add_job(self, message: str, every_seconds: int | None, cron_expr: str | None) -> str:
+
+    def _add_job(
+        self,
+        message: str,
+        every_seconds: int | None,
+        cron_expr: str | None,
+        deliver: bool,
+        original_session_key: str | None,
+        user_id: str | None,
+    ) -> str:
         if not message:
             return "Error: message is required for add"
         if not self._channel or not self._chat_id:
             return "Error: no session context (channel/chat_id)"
-        
+
         # Build schedule
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
@@ -88,16 +111,23 @@ class CronTool(Tool):
             schedule = CronSchedule(kind="cron", expr=cron_expr)
         else:
             return "Error: either every_seconds or cron_expr is required"
-        
+
+        # Use current session as default for original_session_key and user_id
+        default_session_key = f"{self._channel}:{self._chat_id}"
+        default_user_id = f"{self._channel}:{self._chat_id}:user"
+
         job = self._cron.add_job(
             name=message[:30],
             schedule=schedule,
             message=message,
-            deliver=True,
+            deliver=deliver,
             channel=self._channel,
             to=self._chat_id,
+            original_session_key=original_session_key or default_session_key,
+            user_id=user_id or default_user_id,
         )
-        return f"Created job '{job.name}' (id: {job.id})"
+        mode = "Reminder" if deliver else "Task"
+        return f"Created {mode} job '{job.name}' (id: {job.id})"
     
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()

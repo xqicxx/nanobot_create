@@ -28,6 +28,14 @@ class CronPayload:
     channel: str | None = None  # e.g. "whatsapp"
     to: str | None = None  # e.g. phone number
 
+    # === Session context recovery (for Task mode) ===
+    # Original user session key (e.g., "whatsapp:+1234567890")
+    # Used to load user's conversation history when cron job executes
+    original_session_key: str | None = None
+    # User ID for memory retrieval (e.g., "whatsapp:+1234567890:user")
+    # Used to load user's memory context
+    user_id: str | None = None
+
 
 @dataclass
 class CronJobState:

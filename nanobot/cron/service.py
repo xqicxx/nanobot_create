@@ -263,11 +263,13 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        original_session_key: str | None = None,
+        user_id: str | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
         now = _now_ms()
-        
+
         job = CronJob(
             id=str(uuid.uuid4())[:8],
             name=name,
@@ -279,6 +281,8 @@ class CronService:
                 deliver=deliver,
                 channel=channel,
                 to=to,
+                original_session_key=original_session_key,
+                user_id=user_id,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
