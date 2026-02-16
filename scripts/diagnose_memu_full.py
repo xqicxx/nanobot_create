@@ -77,9 +77,15 @@ print_test("DeepSeek API Key", bool(deepseek_key and len(deepseek_key) > 20))
 print_test("SiliconFlow API Key", bool(silicon_key and len(silicon_key) > 20))
 
 # ============================================================================
-# 2. memU 模块导入
+# 2. memU 模块导入 - 必须在导入前设置环境变量
 # ============================================================================
 print_header("2. memU 模块导入")
+
+# 在导入 memu 之前设置环境变量
+os.environ["SILICONFLOW_API_KEY"] = silicon_key
+os.environ["SILICONFLOW_BASE_URL"] = silicon_base_url
+os.environ["SILICONFLOW_EMBED_MODEL"] = silicon_embed_model
+os.environ["SILICONFLOW_PROVIDER"] = "openai"  # SiliconFlow 兼容 OpenAI API
 
 try:
     from memu.memory import MemoryAgent
@@ -98,12 +104,6 @@ except Exception as e:
 # 3. 初始化 MemoryAgent
 # ============================================================================
 print_header("3. 初始化 MemoryAgent")
-
-# 设置 SiliconFlow 环境变量用于 embedding（使用配置文件的值）
-os.environ["SILICONFLOW_API_KEY"] = silicon_key
-os.environ["SILICONFLOW_BASE_URL"] = silicon_base_url
-os.environ["SILICONFLOW_EMBED_MODEL"] = silicon_embed_model
-os.environ["MEMU_EMBEDDING_PROVIDER"] = "openai"  # SiliconFlow 兼容 OpenAI API
 
 try:
     # 配置 LLM
