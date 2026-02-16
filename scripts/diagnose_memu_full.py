@@ -81,11 +81,15 @@ print_test("SiliconFlow API Key", bool(silicon_key and len(silicon_key) > 20))
 # ============================================================================
 print_header("2. memU 模块导入")
 
-# 在导入 memu 之前设置环境变量
+# 在导入 memu 之前设置环境变量 - SiliconFlow 兼容 OpenAI API
+# 需要同时设置 OPENAI_* 变量（memu 默认使用）
+os.environ["OPENAI_API_KEY"] = silicon_key
+os.environ["OPENAI_BASE_URL"] = silicon_base_url
+os.environ["OPENAI_EMBED_MODEL"] = silicon_embed_model
+# 也设置 SILICONFLOW_* 以防万一
 os.environ["SILICONFLOW_API_KEY"] = silicon_key
 os.environ["SILICONFLOW_BASE_URL"] = silicon_base_url
 os.environ["SILICONFLOW_EMBED_MODEL"] = silicon_embed_model
-os.environ["SILICONFLOW_PROVIDER"] = "openai"  # SiliconFlow 兼容 OpenAI API
 
 try:
     from memu.memory import MemoryAgent
