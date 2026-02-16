@@ -361,7 +361,7 @@ class MemoryAdapter:
             result = self._memory_agent.run(
                 conversation=conversation,
                 character_name=user_id,
-                max_iterations=5,  # Limit iterations for performance
+                max_iterations=2,  # Reduced from 5 to 2 for faster performance
             )
             elapsed_ms = int(round((time.perf_counter() - start) * 1000))
             
