@@ -18,6 +18,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+# 检测并使用虚拟环境 Python
+VENV_PYTHON = "/root/nanobot-venv/bin/python"
+if os.path.exists(VENV_PYTHON) and os.path.abspath(sys.executable) != os.path.abspath(VENV_PYTHON):
+    # 重新执行脚本，使用虚拟环境 Python
+    os.execv(VENV_PYTHON, [VENV_PYTHON, __file__] + sys.argv[1:])
+
 # 尝试添加项目路径
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
